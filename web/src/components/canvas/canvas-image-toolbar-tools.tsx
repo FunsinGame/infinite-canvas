@@ -33,7 +33,6 @@ export type ImageToolDefinition = {
 
 export type ImageQuickToolsConfig = {
     ids: ImageQuickToolId[];
-    showLabels: boolean;
 };
 
 export const IMAGE_QUICK_TOOLS_STORAGE_KEY = "canvas-image-quick-tools-v7";
@@ -152,13 +151,10 @@ export function normalizeImageQuickToolIds(value: unknown[]) {
 }
 
 export function readImageQuickToolsConfig(value: unknown): ImageQuickToolsConfig {
-    if (Array.isArray(value)) return { ids: normalizeImageQuickToolIds(value), showLabels: false };
-    if (!value || typeof value !== "object") return { ids: defaultImageQuickToolIds, showLabels: false };
+    if (Array.isArray(value)) return { ids: normalizeImageQuickToolIds(value) };
+    if (!value || typeof value !== "object") return { ids: defaultImageQuickToolIds };
     const data = value as Partial<ImageQuickToolsConfig>;
-    return {
-        ids: Array.isArray(data.ids) ? normalizeImageQuickToolIds(data.ids) : defaultImageQuickToolIds,
-        showLabels: data.showLabels === true,
-    };
+    return { ids: Array.isArray(data.ids) ? normalizeImageQuickToolIds(data.ids) : defaultImageQuickToolIds };
 }
 
 function resolveToolText(value: string | ((node: CanvasNodeData) => string), node: CanvasNodeData) {

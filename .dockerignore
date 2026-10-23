@@ -9,6 +9,9 @@ docs/out
 web/.next
 web/node_modules
 web/out
+desktop/node_modules
+desktop/dist
+desktop/release
 *.log
 .env*
 !.env.example

@@ -33,6 +33,20 @@ http://localhost:3000
 bun run dev
 ```
 
+## 4. 构建 Windows 桌面版
+
+在仓库根目录双击 `build-desktop.cmd`，脚本会自动安装缺少的依赖并生成安装包。国内网络可以直接双击 `build-desktop-mirror.cmd`，使用 npmmirror 镜像构建。也可以手动执行：
+
+```bash
+cd desktop
+npm ci
+bun run dist
+```
+
+安装包生成在 `desktop/release/`。桌面版把用户数据固定保存在 `%LOCALAPPDATA%\infinite-canvas`，覆盖安装新版本不会丢失画布、素材、生成记录和配置。数据目录、卸载行为和浏览器版迁移方式见 `desktop/README.md`。
+
+以上命令从仓库根目录执行；如果刚在 `docs/` 目录里，先回到仓库根目录。
+
 ## 常见场景
 
 - 改画布、页面和交互：主要看 `web/`

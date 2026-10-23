@@ -1,0 +1,19 @@
+{
+    "name": "infinite-canvas-desktop",
+    "productName": "Infinite Canvas",
+    "version": "0.20.0",
+    "private": true,
+    "description": "Infinite Canvas Windows desktop app",
+    "author": "basketikun",
+    "license": "MIT",
+    "main": "main.cjs",
+    "scripts": {
+        "dev": "node scripts/build.mjs --dev",
+        "dist": "node scripts/build.mjs",
+        "dist:dir": "node scripts/build.mjs --dir"
+    },
+    "devDependencies": {
+        "electron": "45.0.0",
+        "electron-builder": "26.15.3"
+    }
+}

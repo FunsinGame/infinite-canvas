@@ -186,6 +186,7 @@ function InfiniteCanvasPage() {
     const imageInputRef = useRef<HTMLInputElement>(null);
     const uploadTargetRef = useRef<{ nodeId?: string; position?: Position } | null>(null);
     const clipboardRef = useRef<CanvasClipboard | null>(null);
+    const pasteHandledRef = useRef(false);
     const historyRef = useRef<{ past: CanvasHistoryEntry[]; future: CanvasHistoryEntry[] }>({ past: [], future: [] });
     const lastHistoryRef = useRef<CanvasHistoryEntry | null>(null);
     const historyCommitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1560,24 +1561,53 @@ function InfiniteCanvasPage() {
         [getCanvasCenter, t],
     );
 
-    const pasteSystemClipboard = useCallback(async () => {
-        if (!navigator.clipboard) return;
+    const pasteClipboardImages = useCallback(
+        async (files: File[]) => {
+            const center = getCanvasCenter();
+            const STAGGER = 40;
+            try {
+                await Promise.all(files.map((file, index) => createImageFileNode(file, { x: center.x + index * STAGGER, y: center.y + index * STAGGER })));
+                message.success(t("canvas.projectPage.clipboardImageAdded"));
+            } catch (error) {
+                message.error(error instanceof Error ? error.message : t("common.imageReadFailed"));
+            }
+        },
+        [createImageFileNode, getCanvasCenter, message, t],
+    );
 
-        const items = await navigator.clipboard.read();
-        const imageItem = items.find((item) => item.types.some((type) => type.startsWith("image/")));
-        if (imageItem) {
-            const imageType = imageItem.types.find((type) => type.startsWith("image/"));
-            if (!imageType) return;
-            const blob = await imageItem.getType(imageType);
-            const file = new File([blob], "clipboard-image.png", { type: imageType });
-            void createImageFileNode(file, getCanvasCenter());
-            message.success(t("canvas.projectPage.clipboardImageAdded"));
-            return;
-        }
+    useEffect(() => {
+        const handlePaste = (event: ClipboardEvent) => {
+            const target = event.target instanceof Element ? event.target : null;
+            if (target?.closest("input, textarea, select, [contenteditable='true'], [data-canvas-shortcuts-ignore]")) return;
 
-        const text = await navigator.clipboard.readText();
-        if (createTextNodeFromClipboard(text)) message.success(t("canvas.projectPage.clipboardTextAdded"));
-    }, [createImageFileNode, createTextNodeFromClipboard, getCanvasCenter, message, t]);
+            const imageFiles = Array.from(event.clipboardData?.items ?? [])
+                .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+                .map((item) => item.getAsFile())
+                .filter((file): file is File => Boolean(file));
+
+            if (imageFiles.length) {
+                event.preventDefault();
+                pasteHandledRef.current = true;
+                void pasteClipboardImages(imageFiles);
+                return;
+            }
+
+            if (pasteCopiedNodes()) {
+                event.preventDefault();
+                pasteHandledRef.current = true;
+                return;
+            }
+
+            if (createTextNodeFromClipboard(event.clipboardData?.getData("text/plain") || "")) {
+                event.preventDefault();
+                pasteHandledRef.current = true;
+                message.success(t("canvas.projectPage.clipboardTextAdded"));
+            }
+        };
+
+        document.addEventListener("paste", handlePaste);
+        return () => document.removeEventListener("paste", handlePaste);
+    }, [createTextNodeFromClipboard, message, pasteClipboardImages, pasteCopiedNodes, t]);
 
     useEffect(() => {
         const handleKeyDown = (event: KeyboardEvent) => {
@@ -1633,8 +1663,14 @@ function InfiniteCanvasPage() {
             }
 
             if (isModifierShortcut && !event.altKey && key === "v") {
-                event.preventDefault();
-                if (!pasteCopiedNodes()) void pasteSystemClipboard();
+                if (!clipboardRef.current) return;
+                // 系统剪贴板里若已有外部图片，交给 paste 事件优先创建图片节点；没有 paste 事件时再粘贴内部节点。
+                pasteHandledRef.current = false;
+                window.setTimeout(() => {
+                    if (pasteHandledRef.current) return;
+                    pasteHandledRef.current = true;
+                    pasteCopiedNodes();
+                }, 0);
                 return;
             }
 
@@ -1665,7 +1701,7 @@ function InfiniteCanvasPage() {
 
         window.addEventListener("keydown", handleKeyDown);
         return () => window.removeEventListener("keydown", handleKeyDown);
-    }, [copySelectedNodes, deleteConnection, deleteNodes, groupSelection, pasteCopiedNodes, pasteSystemClipboard, redoCanvas, selectedConnectionId, setConnecting, undoCanvas, ungroupSelection]);
+    }, [copySelectedNodes, deleteConnection, deleteNodes, groupSelection, pasteCopiedNodes, redoCanvas, selectedConnectionId, setConnecting, undoCanvas, ungroupSelection]);
 
     const handleConnectStart = useCallback(
         (event: ReactMouseEvent, nodeId: string, handleType: "source" | "target") => {

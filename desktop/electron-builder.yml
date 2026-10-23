@@ -1,0 +1,27 @@
+appId: com.basketikun.infinite-canvas
+productName: Infinite Canvas
+copyright: Copyright © 2026 basketikun
+directories:
+  output: release
+files:
+  - main.cjs
+  - package.json
+  - dist/**/*
+asar: true
+npmRebuild: false
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  artifactName: infinite-canvas-${version}-setup.${ext}
+nsis:
+  include: installer.nsh
+  oneClick: true
+  perMachine: false
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: 无限画布
+  uninstallDisplayName: 无限画布
+  deleteAppDataOnUninstall: false
+  runAfterFinish: true

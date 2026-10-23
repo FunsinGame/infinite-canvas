@@ -2,6 +2,15 @@
 
 ## Unreleased
 
++ [新增] 新增 Windows 桌面版（Electron + NSIS 安装包）构建方案和双击构建脚本 `build-desktop.cmd`（含国内镜像版 `build-desktop-mirror.cmd`），用户数据固定保存在 `%LOCALAPPDATA%\infinite-canvas`，覆盖安装新版本不会丢失已有配置和画布数据。
++ [修复] Windows 桌面版构建改为先把 Electron 解压到 `node_modules/electron/dist`，再让 electron-builder 直接复制，绕过 `win-unpacked.tmp` 目录重命名在 Windows 上偶发 `EPERM` 的问题。
++ [修复] 修复 NSIS 安装器在 PowerShell 可用时把安装目录下的任意进程（包括卸载程序自身）误判为运行中的无限画布，导致“无法关闭”和卸载程序写入失败；安装器改为按进程名检测并关闭应用。
++ [修复] Windows 桌面版构建在 electron-builder 重命名 `win-unpacked` 偶发 `EPERM` 时自动清理临时目录并重试，减少安全软件扫描导致的打包失败；构建完成后不再自动打开输出目录，避免占用 `release`。
++ [修复] Windows 桌面版构建脚本改用 npm 安装桌面端依赖，避免 Bun 在 Windows 上移动缓存时偶发 `EPERM` 导致依赖安装失败；前端构建改为 Node 直接调用 Vite，修复 Bun 以 npm 全局 shim 安装时 Node 无法 spawn `bun` 的问题，并提交 `desktop/package-lock.json` 固定依赖版本。
++ [调整] 精简页面右上角操作区：移除语言切换按钮、版本号入口和 GitHub 链接，界面语言固定为简体中文。
++ [修复] 画布改为监听 paste 事件读取剪贴板图片，不再依赖 `navigator.clipboard.read`，截图或浏览器复制的图片可直接创建为图片节点，同时保留文本粘贴和节点复制粘贴。
++ [调整] 图片节点悬浮工具栏的按钮固定显示功能名称（图标 + 文字），包括插件添加的图片工具；「更多」设置只保留快捷工具的勾选。
+
 ## v0.20.0 - 2026-10-10
 
 + [修复] 已选模型或所属渠道被移除时保留原选择并阻止生成及视频任务查询，避免静默切换到默认模型或其他渠道。

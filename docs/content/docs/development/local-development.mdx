@@ -24,6 +24,20 @@ cd docs
 bun run dev
 ```
 
+## Build the Windows desktop app
+
+Double-click `build-desktop.cmd` in the repository root, or run it from a terminal; it installs missing dependencies and builds the installer. On networks where GitHub or npm is slow, double-click `build-desktop-mirror.cmd` to use the npmmirror mirrors.
+
+To run the steps manually, install the web dependencies first (see above), then from the repository root:
+
+```bash
+cd desktop
+npm ci
+bun run dist
+```
+
+The NSIS installer is written to `desktop/release/`. Desktop builds keep user data in `%LOCALAPPDATA%\infinite-canvas`, so installing a newer version over the old one preserves canvases, assets, generation history and settings. See `desktop/README.md` for the data layout, uninstall behavior and browser-to-desktop migration.
+
 Common locations:
 
 - Canvas, pages, and interactions: `web/`
