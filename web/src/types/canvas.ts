@@ -25,6 +25,17 @@ export type CanvasNodeStatus = "idle" | "success" | "loading" | "error";
 export type CanvasGenerationMode = "text" | "image" | "video" | "audio";
 export type CanvasImageGenerationType = "generation" | "edit";
 
+export type CanvasDecompositionMode = "pixel" | "redraw";
+
+export type CanvasDecompositionMeta = {
+    id: string;
+    role: "group" | "base" | "layer";
+    mode: CanvasDecompositionMode;
+    sourceNodeId?: string;
+    index?: number;
+    name?: string;
+};
+
 export type CanvasNodeImage = {
     id: string;
     status: CanvasNodeStatus;
@@ -84,6 +95,7 @@ export type CanvasNodeMetadata = {
     videoTaskId?: string;
     videoTaskProvider?: "openai" | "gemini";
     groupId?: string;
+    decomposition?: CanvasDecompositionMeta;
     interactive?: boolean; // Plugin node interaction/move state; see CanvasNodeDefinition.interactionToggle.
 };
 
