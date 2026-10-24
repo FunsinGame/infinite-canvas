@@ -8,7 +8,7 @@ import { useTranslation } from "react-i18next";
 import { CanvasDecomposeRequestLog, type DecomposeRequestLog } from "@/components/canvas/canvas-decompose-request-log";
 import { useImageEditorViewport } from "@/components/canvas/use-image-editor-viewport";
 import { canvasThemes } from "@/lib/canvas-theme";
-import { buildCutoutRepairReferences, cutoutMattes, flattenCutoutDataUrl, type CutoutMatte, type CutoutRegion } from "@/lib/canvas/canvas-cutout-matting";
+import { buildCutoutRepairReferences, cutoutMattes, type CutoutMatte, type CutoutRegion } from "@/lib/canvas/canvas-cutout-matting";
 import { trimTransparentDataUrl, type ImageCropRect } from "@/lib/canvas/canvas-image-data";
 import { readImageMeta } from "@/lib/image-utils";
 import { requestEdit } from "@/services/api/image";
@@ -85,7 +85,6 @@ export function CanvasNodeCutoutDialog({ dataUrl, open, onClose, onConfirm }: { 
     const [previewIndex, setPreviewIndex] = useState(0);
     const [view, setView] = useState<"edit" | "result">("edit");
     const [showParams, setShowParams] = useState(true);
-    const [applying, setApplying] = useState(false);
     const [error, setError] = useState("");
     const viewport = useImageEditorViewport(image, open, { maxZoom: 8 });
     const maxBrushSize = image ? Math.max(40, Math.round(Math.min(image.width, image.height) * 0.5)) : 200;
@@ -120,7 +119,6 @@ export function CanvasNodeCutoutDialog({ dataUrl, open, onClose, onConfirm }: { 
         setPreviewIndex(0);
         setView("edit");
         setShowParams(true);
-        setApplying(false);
         setBrushPreview(null);
         setError("");
         drawingRef.current = null;
@@ -315,23 +313,14 @@ export function CanvasNodeCutoutDialog({ dataUrl, open, onClose, onConfirm }: { 
         setView("result");
     };
 
-    const applyPreview = async () => {
-        if (!preview || phase || applying) return;
-        setApplying(true);
-        try {
-            const color = cutoutBackgroundColors[cutoutBackground];
-            const dataUrls = color ? await Promise.all(preview.dataUrls.map((dataUrl) => flattenCutoutDataUrl(dataUrl, color))) : preview.dataUrls;
-            onConfirm({ dataUrls });
-            onClose();
-        } catch (applyError) {
-            setError(applyError instanceof Error ? applyError.message : t("canvas.editors.cutoutEmpty"));
-        } finally {
-            setApplying(false);
-        }
+    const applyPreview = () => {
+        if (!preview || phase) return;
+        onConfirm({ dataUrls: preview.dataUrls });
+        onClose();
     };
 
     const submit = async () => {
-        if (!image || locked || applying) return;
+        if (!image || locked) return;
         if (mode === "rect" && !rects.length) {
             setError(t("canvas.editors.cutoutRectRequired"));
             return;
@@ -696,16 +685,16 @@ export function CanvasNodeCutoutDialog({ dataUrl, open, onClose, onConfirm }: { 
                             {error ? <div className="text-xs font-medium text-[#ef4444]">{error}</div> : null}
                             {preview ? <div className="text-[11px] leading-4 opacity-50">{t("canvas.editors.cutoutPreviewHint")}</div> : null}
                             <div className="flex items-center justify-between gap-2">
-                                <Button icon={<RotateCcw className="size-4" />} onClick={resetSelection} disabled={locked || applying}>
+                                <Button icon={<RotateCcw className="size-4" />} onClick={resetSelection} disabled={locked}>
                                     {t("canvas.editors.reset")}
                                 </Button>
                             </div>
                             <div className={`grid gap-2 ${preview ? "grid-cols-2" : "grid-cols-1"}`}>
-                                <Button type={preview ? "default" : "primary"} icon={<RefreshCw className="size-4" />} loading={Boolean(phase)} disabled={!image || locked || applying} onClick={() => void submit()}>
+                                <Button type={preview ? "default" : "primary"} icon={<RefreshCw className="size-4" />} loading={Boolean(phase)} disabled={!image || locked} onClick={() => void submit()}>
                                     {preview ? t("canvas.editors.cutoutRetry") : t("canvas.editors.cutoutConfirm")}
                                 </Button>
                                 {preview ? (
-                                    <Button type="primary" icon={<Check className="size-4" />} loading={applying} disabled={Boolean(phase) || applying} onClick={() => void applyPreview()}>
+                                    <Button type="primary" icon={<Check className="size-4" />} disabled={Boolean(phase)} onClick={applyPreview}>
                                         {t("canvas.editors.cutoutApply")}
                                     </Button>
                                 ) : null}

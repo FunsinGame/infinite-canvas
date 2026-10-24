@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Alert, App, Button, Input, Modal, Popover, Segmented, Select, Space, Steps, Tag, Typography } from "antd";
-import { Download, Eraser, Layers, Play, Scissors, ScrollText, Sparkles, Trash2, Type } from "lucide-react";
+import { Alert, App, Button, Input, Modal, Popover, Select, Space, Steps, Tag, Typography } from "antd";
+import { Download, Eraser, Layers, Play, ScrollText, Sparkles, Trash2, Type } from "lucide-react";
 import { saveAs } from "file-saver";
 import { nanoid } from "nanoid";
 import { useTranslation } from "react-i18next";
@@ -8,7 +8,6 @@ import { useTranslation } from "react-i18next";
 import { CanvasDecomposeBoxEditor } from "@/components/canvas/canvas-decompose-box-editor";
 import { CanvasDecomposeLayerTree } from "@/components/canvas/canvas-decompose-layer-tree";
 import { CanvasDecomposeRequestLog, type DecomposeRequestLog } from "@/components/canvas/canvas-decompose-request-log";
-import { cutoutMattes, defaultCutoutParams } from "@/lib/canvas/canvas-cutout-matting";
 import {
     assignElementParents,
     canvasToBlob,
@@ -31,7 +30,6 @@ import {
     type ElementBox,
     type LayerExportEntry,
 } from "@/lib/canvas/canvas-decompose";
-import { dataUrlToFile } from "@/lib/image-utils";
 import { buildImageReferencePromptText } from "@/lib/image-reference-prompt";
 import { analyzeImageElements } from "@/services/api/decompose-plan";
 import { requestEdit } from "@/services/api/image";
@@ -43,13 +41,10 @@ import type { CanvasNodeData } from "@/types/canvas";
 const TEXT_MODEL_STORAGE_KEY = "infinite-canvas:decompose-text-model";
 const IMAGE_MODEL_STORAGE_KEY = "infinite-canvas:decompose-image-model";
 
-type DecomposeExportMode = "cutout" | "ai";
-
 type DecomposeExportResult = {
     id: string;
     elementId: string;
     elementName: string;
-    mode: DecomposeExportMode;
     dataUrl: string;
     blob: Blob;
     width: number;
@@ -65,8 +60,6 @@ type DecomposeDialogProps = {
     onClose: () => void;
     onOpenConfig: () => void;
 };
-
-const DEFAULT_EXPORT_MODE: DecomposeExportMode = "ai";
 
 function readStoredValue(key: string) {
     try {
@@ -103,7 +96,6 @@ export function CanvasImageDecomposeDialog({ node, open, config, onClose, onOpen
     const [selectedImageModel, setSelectedImageModel] = useState(() => readStoredValue(IMAGE_MODEL_STORAGE_KEY));
     const [analyzing, setAnalyzing] = useState(false);
     const [previews, setPreviews] = useState<Record<string, string>>({});
-    const [modes, setModes] = useState<Record<string, DecomposeExportMode>>({});
     const [runningIds, setRunningIds] = useState<string[]>([]);
     const [results, setResults] = useState<Record<string, DecomposeExportResult[]>>({});
     const [elementErrors, setElementErrors] = useState<Record<string, string>>({});
@@ -150,7 +142,6 @@ export function CanvasImageDecomposeDialog({ node, open, config, onClose, onOpen
         setElements([]);
         setSelectedElementId(null);
         setPreviews({});
-        setModes({});
         setRunningIds([]);
         setResults({});
         setElementErrors({});
@@ -229,7 +220,6 @@ export function CanvasImageDecomposeDialog({ node, open, config, onClose, onOpen
     const orderMap = useMemo(() => new Map(getElementExtractionOrder(elements).filter((element) => element.type === "image").map((element, index) => [element.id, index + 1])), [elements]);
     const resultCount = useMemo(() => exportRows.reduce((total, element) => total + (results[element.id]?.length || 0), 0), [exportRows, results]);
     const anyRunning = runningIds.length > 0;
-    const anyAiMode = exportRows.some((element) => (modes[element.id] || DEFAULT_EXPORT_MODE) === "ai");
 
     useEffect(() => {
         if (!selectedElementId) return;
@@ -298,7 +288,6 @@ export function CanvasImageDecomposeDialog({ node, open, config, onClose, onOpen
             setElements(withParents);
             setSelectedElementId(withParents[0]?.id || null);
             setPreviews({});
-            setModes({});
             setResults({});
             setElementErrors({});
             setRequestLogs([]);
@@ -366,12 +355,6 @@ export function CanvasImageDecomposeDialog({ node, open, config, onClose, onOpen
             delete next[id];
             return next;
         });
-        setModes((current) => {
-            if (!current[id]) return current;
-            const next = { ...current };
-            delete next[id];
-            return next;
-        });
         setElementErrors((current) => {
             if (!current[id]) return current;
             const next = { ...current };
@@ -420,75 +403,6 @@ export function CanvasImageDecomposeDialog({ node, open, config, onClose, onOpen
         if (!elements.length) return;
         setError(null);
         setStep(2);
-    };
-
-    const setElementMode = (id: string, mode: DecomposeExportMode) => {
-        setModes((current) => ({ ...current, [id]: mode }));
-        setElementErrors((current) => {
-            if (!current[id]) return current;
-            const next = { ...current };
-            delete next[id];
-            return next;
-        });
-    };
-
-    const exportByCutout = async (element: DecomposeElement, signal: AbortSignal): Promise<DecomposeExportResult | null> => {
-        if (!workingCanvas || !workingSize.width || !workingSize.height) return null;
-        const startedAt = Date.now();
-        const { width: imageWidth, height: imageHeight } = workingSize;
-        const rect = {
-            x: clamp(element.box.x / imageWidth, 0, 1),
-            y: clamp(element.box.y / imageHeight, 0, 1),
-            width: clamp(element.box.width / imageWidth, 0, 1),
-            height: clamp(element.box.height / imageHeight, 0, 1),
-        };
-        const [matte] = await cutoutMattes(workingUrl, [{ rect }], defaultCutoutParams);
-        if (signal.aborted) return null;
-        if (!matte) throw new Error(t("decompose.cutoutEmpty"));
-
-        const blob = dataUrlToFile({ id: element.id, name: `${sanitizeFileName(element.name)}.png`, type: "image/png", dataUrl: matte.dataUrl });
-        const analysisScale = Math.min(1, defaultCutoutParams.analysisLongEdge / Math.max(imageWidth, imageHeight));
-        const log: DecomposeRequestLog = {
-            id: nanoid(),
-            elementId: element.id,
-            elementName: element.name,
-            box: element.box,
-            model: t("decompose.localCutout"),
-            size: `${matte.box.width}×${matte.box.height}`,
-            quality: "",
-            background: "transparent",
-            count: 1,
-            prompt: "",
-            systemPrompt: "",
-            input: cropBox(workingCanvas, element.box).toDataURL("image/png"),
-            output: matte.dataUrl,
-            status: "success",
-            durationMs: Date.now() - startedAt,
-            createdAt: startedAt,
-            cutout: {
-                params: { ...defaultCutoutParams },
-                selection: { x: Math.round(element.box.x), y: Math.round(element.box.y), width: Math.round(element.box.width), height: Math.round(element.box.height) },
-                imageWidth,
-                imageHeight,
-                analysisWidth: Math.max(1, Math.round(imageWidth * analysisScale)),
-                analysisHeight: Math.max(1, Math.round(imageHeight * analysisScale)),
-                outputWidth: matte.box.width,
-                outputHeight: matte.box.height,
-            },
-        };
-        setRequestLogs((current) => [...current, log]);
-        return {
-            id: nanoid(),
-            elementId: element.id,
-            elementName: element.name,
-            mode: "cutout",
-            dataUrl: matte.dataUrl,
-            blob,
-            width: matte.box.width,
-            height: matte.box.height,
-            logs: [log],
-            createdAt: startedAt,
-        };
     };
 
     const exportByAi = async (element: DecomposeElement, signal: AbortSignal): Promise<DecomposeExportResult | null> => {
@@ -572,7 +486,6 @@ export function CanvasImageDecomposeDialog({ node, open, config, onClose, onOpen
             id: nanoid(),
             elementId: element.id,
             elementName: element.name,
-            mode: "ai",
             dataUrl: resultDataUrl,
             blob,
             width: canvas.width,
@@ -584,8 +497,7 @@ export function CanvasImageDecomposeDialog({ node, open, config, onClose, onOpen
 
     const runExport = async (element: DecomposeElement) => {
         if (!workingCanvas || !node || runningRef.current.has(element.id)) return;
-        const mode = modes[element.id] || DEFAULT_EXPORT_MODE;
-        if (mode === "ai" && !imageReady) {
+        if (!imageReady) {
             setElementErrors((current) => ({ ...current, [element.id]: t("decompose.imageModelRequired") }));
             return;
         }
@@ -602,7 +514,7 @@ export function CanvasImageDecomposeDialog({ node, open, config, onClose, onOpen
         const controller = new AbortController();
         runAbortsRef.current.add(controller);
         try {
-            const result = mode === "cutout" ? await exportByCutout(element, controller.signal) : await exportByAi(element, controller.signal);
+            const result = await exportByAi(element, controller.signal);
             if (!result || controller.signal.aborted) return;
             setResults((current) => ({ ...current, [element.id]: [...(current[element.id] || []), result] }));
         } catch (exportError) {
@@ -618,7 +530,7 @@ export function CanvasImageDecomposeDialog({ node, open, config, onClose, onOpen
     };
 
     const downloadResult = (result: DecomposeExportResult, index: number) => {
-        saveAs(result.blob, `${sanitizeFileName(result.elementName)}-${result.mode}-${index + 1}.png`);
+        saveAs(result.blob, `${sanitizeFileName(result.elementName)}-${index + 1}.png`);
     };
 
     const deleteResult = (result: DecomposeExportResult) => {
@@ -639,7 +551,7 @@ export function CanvasImageDecomposeDialog({ node, open, config, onClose, onOpen
         const entries: LayerExportEntry[] = [];
         exportRows.forEach((element, elementIndex) => {
             (results[element.id] || []).forEach((result, resultIndex) => {
-                entries.push({ name: `${String(elementIndex + 1).padStart(2, "0")}-${sanitizeFileName(element.name)}-${result.mode}-${resultIndex + 1}.png`, blob: result.blob });
+                entries.push({ name: `${String(elementIndex + 1).padStart(2, "0")}-${sanitizeFileName(element.name)}-${resultIndex + 1}.png`, blob: result.blob });
             });
         });
         if (!entries.length) {
@@ -840,12 +752,11 @@ export function CanvasImageDecomposeDialog({ node, open, config, onClose, onOpen
                         </div>
                     ) : null}
                     {error ? <Alert type="error" showIcon message={t("decompose.failed")} description={error} /> : null}
-                    {anyAiMode && !imageReady ? <Alert type="warning" showIcon message={t("decompose.imageModelRequired")} action={<Button size="small" onClick={onOpenConfig}>{t("decompose.openConfig")}</Button>} /> : null}
+                    {exportRows.length && !imageReady ? <Alert type="warning" showIcon message={t("decompose.imageModelRequired")} action={<Button size="small" onClick={onOpenConfig}>{t("decompose.openConfig")}</Button>} /> : null}
 
                     <div className="space-y-2">
                         {exportRows.length ? (
                             exportRows.map((element) => {
-                                const mode = modes[element.id] || DEFAULT_EXPORT_MODE;
                                 const running = runningIds.includes(element.id);
                                 const elementError = elementErrors[element.id];
                                 const list = results[element.id] || [];
@@ -878,16 +789,6 @@ export function CanvasImageDecomposeDialog({ node, open, config, onClose, onOpen
                                                     {Math.round(element.box.width)}×{Math.round(element.box.height)} · {element.resolution.toUpperCase()}
                                                 </div>
                                             </div>
-                                            <Segmented
-                                                size="small"
-                                                value={mode}
-                                                disabled={running || exportingAll}
-                                                options={[
-                                                    { value: "cutout", label: <span className="inline-flex items-center gap-1"><Scissors className="size-3.5" />{t("decompose.modeCutout")}</span> },
-                                                    { value: "ai", label: <span className="inline-flex items-center gap-1"><Sparkles className="size-3.5" />{t("decompose.modeAi")}</span> },
-                                                ]}
-                                                onChange={(value) => setElementMode(element.id, value as DecomposeExportMode)}
-                                            />
                                             <Button type="primary" icon={<Play className="size-3.5" />} loading={running} disabled={running || exportingAll} onClick={() => void runExport(element)}>
                                                 {t("decompose.execute")}
                                             </Button>
@@ -913,7 +814,6 @@ export function CanvasImageDecomposeDialog({ node, open, config, onClose, onOpen
                                                         </Popover>
                                                         <div className="min-w-0 flex-1">
                                                             <div className="flex flex-wrap items-center gap-1.5 text-xs">
-                                                                <Tag className="m-0" color={result.mode === "ai" ? "purple" : "blue"}>{result.mode === "ai" ? t("decompose.modeAi") : t("decompose.modeCutout")}</Tag>
                                                                 <span>{t("decompose.resultRun", { index: index + 1 })}</span>
                                                             </div>
                                                             <div className="mt-0.5 text-[11px] text-stone-500">{result.width}×{result.height} · {new Date(result.createdAt).toLocaleTimeString()}</div>
@@ -939,7 +839,6 @@ export function CanvasImageDecomposeDialog({ node, open, config, onClose, onOpen
                 open={Boolean(resultLog)}
                 logs={resultLog?.logs || []}
                 fileBase={node?.title || t("decompose.title")}
-                title={resultLog?.mode === "cutout" ? t("decompose.cutoutLogTitle") : t("decompose.logs.title")}
                 onClose={() => setResultLog(null)}
             />
         </Modal>

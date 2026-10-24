@@ -79,19 +79,6 @@ export async function cutoutMattes(dataUrl: string, regions: CutoutRegion[], par
     return results;
 }
 
-/** 把透明抠图合成到指定背景色上，用于黑/白/绿三种非透明背景。 */
-export async function flattenCutoutDataUrl(dataUrl: string, color: string) {
-    const image = await loadImage(dataUrl);
-    const canvas = document.createElement("canvas");
-    canvas.width = image.width;
-    canvas.height = image.height;
-    const context = canvas.getContext("2d")!;
-    context.fillStyle = color;
-    context.fillRect(0, 0, canvas.width, canvas.height);
-    context.drawImage(image, 0, 0);
-    return canvas.toDataURL("image/png");
-}
-
 /**
  * 生成 AI 修补用的两张参考图：图 1 是本地结果铺品红底，图 2 是同一区域的原图。
  * 图 2 供模型补回被误删的边缘细节，图 1 告诉模型当前哪些区域已判为背景。

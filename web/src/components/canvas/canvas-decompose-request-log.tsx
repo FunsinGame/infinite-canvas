@@ -4,19 +4,7 @@ import { useTranslation } from "react-i18next";
 
 import { useCopyText } from "@/hooks/use-copy-text";
 import { downloadZip, sanitizeFileName, type ElementBox, type LayerExportEntry } from "@/lib/canvas/canvas-decompose";
-import type { CutoutParams } from "@/lib/canvas/canvas-cutout-matting";
 import { dataUrlToFile } from "@/lib/image-utils";
-
-export type DecomposeCutoutLog = {
-    params: CutoutParams;
-    selection: ElementBox;
-    imageWidth: number;
-    imageHeight: number;
-    analysisWidth: number;
-    analysisHeight: number;
-    outputWidth: number;
-    outputHeight: number;
-};
 
 export type DecomposeRequestLog = {
     id: string;
@@ -37,7 +25,6 @@ export type DecomposeRequestLog = {
     error?: string;
     durationMs?: number;
     createdAt: number;
-    cutout?: DecomposeCutoutLog;
 };
 
 type Props = {
@@ -73,20 +60,6 @@ export function CanvasDecomposeRequestLog({ open, logs, fileBase, onClose, title
                 status: log.status,
                 error: log.error || null,
                 durationMs: log.durationMs ?? null,
-                cutout: log.cutout
-                    ? {
-                          params: log.cutout.params,
-                          selection: {
-                              x: Math.round(log.cutout.selection.x),
-                              y: Math.round(log.cutout.selection.y),
-                              width: Math.round(log.cutout.selection.width),
-                              height: Math.round(log.cutout.selection.height),
-                          },
-                          imageSize: { width: log.cutout.imageWidth, height: log.cutout.imageHeight },
-                          analysisSize: { width: log.cutout.analysisWidth, height: log.cutout.analysisHeight },
-                          outputSize: { width: log.cutout.outputWidth, height: log.cutout.outputHeight },
-                      }
-                    : null,
                 input: files.inputs[0],
                 inputs: files.inputs,
                 output: log.output ? files.output : null,
@@ -179,76 +152,36 @@ function RequestCard({ log, index, boxLabel }: { log: DecomposeRequestLog; index
                 </div>
 
                 <div className="min-w-0 space-y-2">
-                    {log.cutout ? (
-                        <>
-                            <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-stone-500">
-                                <span>
-                                    {t("decompose.logs.cutoutMethod")}: {t("decompose.logs.cutoutRect")}
-                                </span>
-                                <span>
-                                    {t("decompose.logs.cutoutSelection")}: {Math.round(log.cutout.selection.x)}, {Math.round(log.cutout.selection.y)} · {Math.round(log.cutout.selection.width)}×{Math.round(log.cutout.selection.height)}
-                                </span>
-                                <span>
-                                    {t("decompose.logs.cutoutImageSize")}: {log.cutout.imageWidth}×{log.cutout.imageHeight}
-                                </span>
-                                <span>
-                                    {t("decompose.logs.cutoutAnalysisSize")}: {log.cutout.analysisWidth}×{log.cutout.analysisHeight}
-                                </span>
-                                <span>
-                                    {t("decompose.logs.cutoutOutputSize")}: {log.cutout.outputWidth}×{log.cutout.outputHeight}
-                                </span>
-                                <span>
-                                    {t("decompose.logs.cutoutEdgeThreshold")}: {log.cutout.params.edgeThreshold}
-                                </span>
-                                <span>
-                                    {t("decompose.logs.cutoutCentralRatio")}: {Math.round(log.cutout.params.centralRatio * 100)}%
-                                </span>
-                                <span>
-                                    {t("decompose.logs.cutoutFeather")}: {log.cutout.params.feather}px
-                                </span>
-                                <span>
-                                    {t("decompose.logs.cutoutShrink")}: {log.cutout.params.shrink}px
-                                </span>
-                                <span>
-                                    {t("decompose.logs.cutoutQuality")}: {log.cutout.params.analysisLongEdge}
-                                </span>
-                            </div>
-                            {log.error ? <div className="rounded-md border border-red-300/60 bg-red-50 p-2 text-xs text-red-600 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-300">{log.error}</div> : null}
-                        </>
-                    ) : (
-                        <>
-                            <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-stone-500">
-                                <span>
-                                    {t("decompose.logs.size")}: {log.size}
-                                </span>
-                                <span>
-                                    {t("decompose.logs.quality")}: {log.quality || "auto"}
-                                </span>
-                                <span>
-                                    {t("decompose.logs.background")}: {log.background || "-"}
-                                </span>
-                                <span>
-                                    {t("decompose.logs.quantity")}: {log.count}
-                                </span>
-                                <span>
-                                    {boxLabel || t("decompose.logs.box")}: {Math.round(log.box.width)}×{Math.round(log.box.height)}
-                                </span>
-                            </div>
-                            {log.systemPrompt ? (
-                                <div className="text-[11px] text-stone-500">
-                                    {t("decompose.logs.systemPrompt")}: {log.systemPrompt}
-                                </div>
-                            ) : null}
-                            <div className="flex items-center justify-between gap-2">
-                                <span className="text-[11px] text-stone-500">{t("decompose.logs.prompt")}</span>
-                                <Button type="text" size="small" icon={<Copy className="size-3.5" />} onClick={() => copyText(log.prompt, t("decompose.logs.copied"))}>
-                                    {t("decompose.logs.copyPrompt")}
-                                </Button>
-                            </div>
-                            <pre className="thin-scrollbar max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-md bg-black/5 p-2 text-xs leading-5 dark:bg-white/10">{log.prompt}</pre>
-                            {log.error ? <div className="rounded-md border border-red-300/60 bg-red-50 p-2 text-xs text-red-600 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-300">{log.error}</div> : null}
-                        </>
-                    )}
+                    <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-stone-500">
+                        <span>
+                            {t("decompose.logs.size")}: {log.size}
+                        </span>
+                        <span>
+                            {t("decompose.logs.quality")}: {log.quality || "auto"}
+                        </span>
+                        <span>
+                            {t("decompose.logs.background")}: {log.background || "-"}
+                        </span>
+                        <span>
+                            {t("decompose.logs.quantity")}: {log.count}
+                        </span>
+                        <span>
+                            {boxLabel || t("decompose.logs.box")}: {Math.round(log.box.width)}×{Math.round(log.box.height)}
+                        </span>
+                    </div>
+                    {log.systemPrompt ? (
+                        <div className="text-[11px] text-stone-500">
+                            {t("decompose.logs.systemPrompt")}: {log.systemPrompt}
+                        </div>
+                    ) : null}
+                    <div className="flex items-center justify-between gap-2">
+                        <span className="text-[11px] text-stone-500">{t("decompose.logs.prompt")}</span>
+                        <Button type="text" size="small" icon={<Copy className="size-3.5" />} onClick={() => copyText(log.prompt, t("decompose.logs.copied"))}>
+                            {t("decompose.logs.copyPrompt")}
+                        </Button>
+                    </div>
+                    <pre className="thin-scrollbar max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-md bg-black/5 p-2 text-xs leading-5 dark:bg-white/10">{log.prompt}</pre>
+                    {log.error ? <div className="rounded-md border border-red-300/60 bg-red-50 p-2 text-xs text-red-600 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-300">{log.error}</div> : null}
                 </div>
             </div>
         </div>
