@@ -1866,6 +1866,15 @@ function InfiniteCanvasPage() {
 
     const handleConfigNodeChange = useCallback((nodeId: string, patch: Partial<CanvasNodeData["metadata"]>) => {
         setNodes((prev) => prev.map((node) => (node.id === nodeId ? applyNodeConfigPatch(node, patch) : node)));
+        const node = nodesRef.current.find((item) => item.id === nodeId);
+        if (!node) return;
+        const mode = node.type === CanvasNodeType.Image ? "image" : node.type === CanvasNodeType.Config ? node.metadata?.generationMode || "image" : getNodeDefinition(node.type)?.useBuiltinPanel?.mode;
+        if (mode !== "image") return;
+        // Remember the last used image-generation settings globally so newly created image nodes start from them.
+        const { updateConfig } = useConfigStore.getState();
+        if (patch.model) updateConfig("imageModel", patch.model);
+        if (patch.size) updateConfig("size", patch.size);
+        if (patch.background !== undefined) updateConfig("background", patch.background);
     }, []);
 
     const downloadDecomposeResult = useCallback(
