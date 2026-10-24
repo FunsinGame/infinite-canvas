@@ -1,17 +1,18 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Alert, App, Button, Input, Modal, Progress, Select, Space, Spin, Steps, Tag, Typography } from "antd";
-import { Download, Eraser, FileJson, Layers, LoaderCircle, RotateCcw, Sparkles, Trash2, Type } from "lucide-react";
+import { Download, Eraser, FileJson, Layers, LoaderCircle, RotateCcw, ScrollText, Sparkles, Trash2, Type } from "lucide-react";
 import { nanoid } from "nanoid";
 import { useTranslation } from "react-i18next";
 
 import { CanvasDecomposeBoxEditor } from "@/components/canvas/canvas-decompose-box-editor";
 import { CanvasDecomposeLayerTree } from "@/components/canvas/canvas-decompose-layer-tree";
+import { CanvasDecomposeRequestLog, type DecomposeRequestLog } from "@/components/canvas/canvas-decompose-request-log";
 import { CanvasDecomposeRestorePreview } from "@/components/canvas/canvas-decompose-restore-preview";
 import {
     assignElementParents,
+    buildDecomposeExport,
     canvasToBlob,
     createElementPreviewDataUrl,
-    createMaskDataUrl,
     cropBox,
     downloadJson,
     downloadLayerZip,
@@ -19,20 +20,25 @@ import {
     fitAiSize,
     fitWorkingSize,
     getDescendantElements,
-    getElementDepth,
     getElementExtractionOrder,
+    getElementRequestSize,
     isElementDescendant,
     loadImage,
     sanitizeFileName,
+    trimTransparent,
+    type DecomposeCache,
     type DecomposeElement,
     type DecomposeElementType,
+    type DecomposeExportPayload,
+    type DecomposeResolution,
     type ElementBox,
     type ExtractedLayer,
     type LayerExportEntry,
 } from "@/lib/canvas/canvas-decompose";
+import { buildImageReferencePromptText } from "@/lib/image-reference-prompt";
 import { analyzeImageElements } from "@/services/api/decompose-plan";
 import { requestEdit } from "@/services/api/image";
-import { imageToDataUrl, uploadImage } from "@/services/image-storage";
+import { getImageBlob, imageToDataUrl, resolveImageUrl, uploadImage } from "@/services/image-storage";
 import { modelOptionLabel, resolveModelForCapability, selectableModelsByCapability, useConfigStore, type AiConfig } from "@/stores/use-config-store";
 import type { ReferenceImage } from "@/types/image";
 import type { CanvasNodeData } from "@/types/canvas";
@@ -48,6 +54,7 @@ type DecomposeDialogProps = {
     config: AiConfig;
     onClose: () => void;
     onOpenConfig: () => void;
+    onExported?: (payload: DecomposeExportPayload) => Promise<boolean | void> | boolean | void;
 };
 
 function readStoredValue(key: string) {
@@ -62,7 +69,7 @@ function clamp(value: number, min: number, max: number) {
     return Math.max(min, Math.min(max, value));
 }
 
-export function CanvasImageDecomposeDialog({ node, open, config, onClose, onOpenConfig }: DecomposeDialogProps) {
+export function CanvasImageDecomposeDialog({ node, open, config, onClose, onOpenConfig, onExported }: DecomposeDialogProps) {
     const { t } = useTranslation();
     const { message, modal } = App.useApp();
     const isAiConfigReady = useConfigStore((state) => state.isAiConfigReady);
@@ -89,6 +96,9 @@ export function CanvasImageDecomposeDialog({ node, open, config, onClose, onOpen
     const [offsets, setOffsets] = useState<Record<string, Offset>>({});
     const [selectedLayerId, setSelectedLayerId] = useState<string | null>(null);
     const [error, setError] = useState<string | null>(null);
+    const [requestLogs, setRequestLogs] = useState<DecomposeRequestLog[]>([]);
+    const [logsOpen, setLogsOpen] = useState(false);
+    const [exporting, setExporting] = useState(false);
 
     useEffect(() => {
         configRef.current = config;
@@ -128,17 +138,21 @@ export function CanvasImageDecomposeDialog({ node, open, config, onClose, onOpen
         setOffsets({});
         setSelectedLayerId(null);
         setError(null);
+        setRequestLogs([]);
+        setLogsOpen(false);
         setAnalyzing(false);
         setExtracting(false);
         setExtractProgress(null);
+        setExporting(false);
 
+        const cache = node.metadata.decompose;
         const contentUrl = node.metadata.content;
         void (async () => {
             try {
                 const image = await loadImage(contentUrl);
                 const naturalWidth = node.metadata?.naturalWidth || image.naturalWidth || node.width;
                 const naturalHeight = node.metadata?.naturalHeight || image.naturalHeight || node.height;
-                const size = fitWorkingSize(naturalWidth, naturalHeight);
+                const size = cache?.width && cache.height ? { width: cache.width, height: cache.height } : fitWorkingSize(naturalWidth, naturalHeight);
                 const canvas = drawToSize(image, size.width, size.height);
                 const blob = await canvasToBlob(canvas);
                 const url = URL.createObjectURL(blob);
@@ -150,6 +164,16 @@ export function CanvasImageDecomposeDialog({ node, open, config, onClose, onOpen
                 setWorkingCanvas(canvas);
                 setWorkingUrl(url);
                 setWorkingSize(size);
+                if (cache?.elements?.length) {
+                    const cachedLayers = await hydrateCachedLayers(cache);
+                    if (cancelled) return;
+                    setElements(cache.elements.map((element) => ({ ...element, box: { ...element.box } })));
+                    setOffsets({ ...(cache.offsets || {}) });
+                    setLayers(cachedLayers);
+                    if (cache.textModel) setSelectedTextModel(cache.textModel);
+                    if (cache.imageModel) setSelectedImageModel(cache.imageModel);
+                    setStep(2);
+                }
                 setPreparing(false);
             } catch (loadError) {
                 if (cancelled) return;
@@ -191,7 +215,7 @@ export function CanvasImageDecomposeDialog({ node, open, config, onClose, onOpen
     }, [selectedElementId]);
 
     useEffect(() => {
-        if (step !== 1 || !workingCanvas || !elements.length) return;
+        if (step === 0 || !workingCanvas || !elements.length) return;
         const next: Record<string, string> = {};
         for (const element of elements) {
             next[element.id] = createElementPreviewDataUrl(workingCanvas, element, getDescendantElements(elements, element.id));
@@ -201,6 +225,8 @@ export function CanvasImageDecomposeDialog({ node, open, config, onClose, onOpen
 
     const close = () => {
         abortRef.current?.abort();
+        setLogsOpen(false);
+        setRequestLogs([]);
         onClose();
     };
 
@@ -233,6 +259,7 @@ export function CanvasImageDecomposeDialog({ node, open, config, onClose, onOpen
                         name: plan.name || `Element ${index + 1}`,
                         description: plan.description,
                         type: plan.type,
+                        resolution: "1k",
                         box: { x: Math.round(x1), y: Math.round(y1), width: Math.round(x2 - x1), height: Math.round(y2 - y1) },
                         parentId: null,
                     };
@@ -286,6 +313,7 @@ export function CanvasImageDecomposeDialog({ node, open, config, onClose, onOpen
             name: t("decompose.newElementName", { index: elements.length + 1 }),
             description: "",
             type: "image",
+            resolution: "1k",
             box,
             parentId: null,
         };
@@ -324,6 +352,10 @@ export function CanvasImageDecomposeDialog({ node, open, config, onClose, onOpen
         setElements((current) => current.map((element) => (element.id === id ? { ...element, type } : element)));
     };
 
+    const changeElementResolution = (id: string, resolution: DecomposeResolution) => {
+        setElements((current) => current.map((element) => (element.id === id ? { ...element, resolution } : element)));
+    };
+
     const reparentElement = (id: string, parentId: string | null) => {
         if (parentId && (parentId === id || isElementDescendant(elements, id, parentId))) return;
         setElements((current) => current.map((element) => (element.id === id ? { ...element, parentId } : element)));
@@ -348,6 +380,8 @@ export function CanvasImageDecomposeDialog({ node, open, config, onClose, onOpen
         setError(null);
         setExtracting(true);
         setExtractProgress(null);
+        setRequestLogs([]);
+        setLogsOpen(false);
         setLayers({});
         setOffsets({});
         setSelectedLayerId(null);
@@ -356,7 +390,6 @@ export function CanvasImageDecomposeDialog({ node, open, config, onClose, onOpen
 
         const order = getElementExtractionOrder(elements);
         const imageElements = order.filter((element) => element.type === "image");
-        const editConfig = { ...configRef.current, model: imageModel, count: "1", size: "auto", background: "transparent" };
         const nextLayers: Record<string, ExtractedLayer> = {};
         let current = 0;
 
@@ -368,20 +401,15 @@ export function CanvasImageDecomposeDialog({ node, open, config, onClose, onOpen
                 current += 1;
                 setExtractProgress({ current, total: imageElements.length, name: element.name });
                 const descendants = getDescendantElements(elements, element.id);
+                const logId = nanoid();
+                const startedAt = Date.now();
                 let canvas: HTMLCanvasElement;
 
                 try {
                     const aiSize = fitAiSize(element.box.width, element.box.height);
                     const crop = cropBox(workingCanvas, element.box);
                     const aiSource = drawToSize(crop, aiSize.width, aiSize.height);
-                    const sourceRef: ReferenceImage = {
-                        id: element.id,
-                        name: `${sanitizeFileName(element.name)}.png`,
-                        type: "image/png",
-                        dataUrl: aiSource.toDataURL("image/png"),
-                    };
-                    const references: ReferenceImage[] = [sourceRef];
-                    const maskBoxes = descendants
+                    const childBoxes = descendants
                         .map((child) => {
                             const left = (Math.max(child.box.x, element.box.x) - element.box.x) / element.box.width;
                             const top = (Math.max(child.box.y, element.box.y) - element.box.y) / element.box.height;
@@ -391,19 +419,35 @@ export function CanvasImageDecomposeDialog({ node, open, config, onClose, onOpen
                         })
                         .filter((box) => box.width > 0 && box.height > 0);
 
-                    if (maskBoxes.length) {
-                        references.push({ id: nanoid(), name: "mask.png", type: "image/png", dataUrl: createMaskDataUrl(aiSize.width, aiSize.height, maskBoxes) });
+                    // Filled magenta marker: models that ignore masks still treat it as a placeholder instead of content.
+                    if (childBoxes.length) {
+                        const context = aiSource.getContext("2d")!;
+                        context.fillStyle = "#ff00ff";
+                        for (const box of childBoxes) context.fillRect(box.x, box.y, box.width, box.height);
                     }
 
-                    const prompt = maskBoxes.length ? t("decompose.cutoutMaskPrompt") : t("decompose.cutoutPrompt");
+                    const inputDataUrl = aiSource.toDataURL("image/png");
+                    const references: ReferenceImage[] = [{ id: element.id, name: `${sanitizeFileName(element.name)}.png`, type: "image/png", dataUrl: inputDataUrl }];
+                    const prompt = childBoxes.length ? t("decompose.cutoutInpaintPrompt") : t("decompose.cutoutPrompt");
+                    const requestSize = getElementRequestSize(element.box.width, element.box.height, element.resolution);
+                    const systemPrompt = configRef.current.systemPrompt;
+                    const editConfig = { ...configRef.current, model: imageModel, count: "1", size: requestSize, background: "transparent" };
+                    setRequestLogs((current) => [
+                        ...current,
+                        { id: logId, elementId: element.id, elementName: element.name, box: element.box, model: imageModel, size: requestSize, quality: configRef.current.quality, background: "transparent", count: 1, prompt: buildImageReferencePromptText(prompt, references), systemPrompt, input: inputDataUrl, status: "loading", createdAt: startedAt },
+                    ]);
                     const result = await requestEdit(editConfig, prompt, references, { signal: controller.signal });
                     if (controller.signal.aborted) return;
                     if (!result[0]) throw new Error(t("decompose.failed"));
                     const resultUrl = await imageToDataUrl({ dataUrl: result[0].dataUrl }, { signal: controller.signal });
                     const resultImage = await loadImage(resultUrl);
-                    canvas = drawToSize(resultImage, element.box.width, element.box.height);
+                    const trimmedResult = trimTransparent(resultImage);
+                    if (!trimmedResult) throw new Error(t("decompose.emptyResult"));
+                    canvas = drawToSize(trimmedResult, element.box.width, element.box.height);
+                    setRequestLogs((current) => current.map((log) => (log.id === logId ? { ...log, status: "success", output: resultUrl, durationMs: Date.now() - startedAt } : log)));
                 } catch (extractError) {
                     if (controller.signal.aborted) return;
+                    setRequestLogs((current) => current.map((log) => (log.id === logId ? { ...log, status: "error", error: extractError instanceof Error ? extractError.message : t("decompose.failed"), durationMs: Date.now() - startedAt } : log)));
                     message.warning(t("decompose.extractFallback", { name: element.name }));
                     canvas = cropBox(workingCanvas, element.box);
                 }
@@ -439,47 +483,28 @@ export function CanvasImageDecomposeDialog({ node, open, config, onClose, onOpen
         setSelectedLayerId(null);
     };
 
+    const buildCache = (): DecomposeCache => ({
+        width: workingSize.width,
+        height: workingSize.height,
+        elements: elements.map((element) => ({ ...element, box: { ...element.box } })),
+        layers: Object.values(layers).map((layer) => ({ elementId: layer.elementId, storageKey: layer.uploaded.storageKey, width: layer.width, height: layer.height })),
+        offsets: { ...offsets },
+        textModel,
+        imageModel,
+    });
+
     const buildExport = async () => {
         if (!workingCanvas || !node) throw new Error(t("decompose.failed"));
-        const order = getElementExtractionOrder(elements);
-        const indexMap = new Map(order.map((element, index) => [element.id, index + 1]));
-        const fileById = new Map<string, string>();
-        order.forEach((element, index) => {
-            if (element.type !== "image" || !layers[element.id]) return;
-            fileById.set(element.id, `layers/${String(index + 1).padStart(2, "0")}-${sanitizeFileName(element.name)}.png`);
-        });
-        const json = {
-            version: 1,
-            image: { width: workingSize.width, height: workingSize.height },
-            base: "base.png",
-            elements: order.map((element) => {
-                const offset = offsets[element.id] || { dx: 0, dy: 0 };
-                return {
-                    id: element.id,
-                    name: element.name,
-                    text: element.type === "text" ? element.name : null,
-                    description: element.description,
-                    type: element.type,
-                    parentId: element.parentId,
-                    depth: getElementDepth(elements, element.id),
-                    order: indexMap.get(element.id),
-                    box: {
-                        x: Math.round(element.box.x + offset.dx),
-                        y: Math.round(element.box.y + offset.dy),
-                        width: Math.round(element.box.width),
-                        height: Math.round(element.box.height),
-                    },
-                    image: fileById.get(element.id) || null,
-                };
-            }),
-        };
-        return { json, baseBlob: await canvasToBlob(workingCanvas), fileById };
+        const cache = buildCache();
+        const { json, fileById } = buildDecomposeExport(cache);
+        return { cache, json, fileById, baseBlob: await canvasToBlob(workingCanvas) };
     };
 
     const exportZip = async () => {
-        if (!node) return;
+        if (!node || exporting) return;
+        setExporting(true);
         try {
-            const { json, baseBlob, fileById } = await buildExport();
+            const { cache, json, baseBlob, fileById } = await buildExport();
             const entries: LayerExportEntry[] = [{ name: "base.png", blob: baseBlob }];
             for (const [elementId, fileName] of fileById) {
                 const layer = layers[elementId];
@@ -487,20 +512,27 @@ export function CanvasImageDecomposeDialog({ node, open, config, onClose, onOpen
             }
             entries.push({ name: "layers.json", blob: new Blob([JSON.stringify(json, null, 2)], { type: "application/json" }) });
             await downloadLayerZip(entries, node.title || t("decompose.title"));
-            message.success(t("decompose.exportDone"));
+            const created = onExported ? await onExported({ sourceNodeId: node.id, cache, baseBlob }) : false;
+            message.success(t(created === false ? "decompose.exportDone" : "decompose.exportAndCreated"));
         } catch (exportError) {
             message.error(exportError instanceof Error ? exportError.message : t("decompose.failed"));
+        } finally {
+            setExporting(false);
         }
     };
 
     const exportJsonOnly = async () => {
-        if (!node) return;
+        if (!node || exporting) return;
+        setExporting(true);
         try {
-            const { json } = await buildExport();
+            const { cache, json, baseBlob } = await buildExport();
             downloadJson(json, node.title || t("decompose.title"));
-            message.success(t("decompose.exportDone"));
+            const created = onExported ? await onExported({ sourceNodeId: node.id, cache, baseBlob }) : false;
+            message.success(t(created === false ? "decompose.exportDone" : "decompose.exportAndCreated"));
         } catch (exportError) {
             message.error(exportError instanceof Error ? exportError.message : t("decompose.failed"));
+        } finally {
+            setExporting(false);
         }
     };
 
@@ -545,16 +577,21 @@ export function CanvasImageDecomposeDialog({ node, open, config, onClose, onOpen
             keyboard={false}
             destroyOnHidden
         >
-            <Steps
-                size="small"
-                current={step}
-                className="mb-4"
-                items={[
-                    { title: t("decompose.steps.analyze") },
-                    { title: t("decompose.steps.hierarchy") },
-                    { title: t("decompose.steps.restore") },
-                ]}
-            />
+            <div className="mb-4 flex items-start gap-3">
+                <Steps
+                    size="small"
+                    current={step}
+                    className="min-w-0 flex-1"
+                    items={[
+                        { title: t("decompose.steps.analyze") },
+                        { title: t("decompose.steps.hierarchy") },
+                        { title: t("decompose.steps.restore") },
+                    ]}
+                />
+                <Button size="small" icon={<ScrollText className="size-3.5" />} disabled={!requestLogs.length} onClick={() => setLogsOpen(true)}>
+                    {t("decompose.logs.button", { count: requestLogs.length })}
+                </Button>
+            </div>
 
             {preparing ? (
                 <div className="flex min-h-48 flex-col items-center justify-center gap-3 text-sm text-stone-500">
@@ -677,7 +714,7 @@ export function CanvasImageDecomposeDialog({ node, open, config, onClose, onOpen
                     {error ? <Alert type="error" showIcon message={t("decompose.failed")} description={error} /> : null}
 
                     <div className={extracting ? "pointer-events-none opacity-60" : ""}>
-                        <CanvasDecomposeLayerTree elements={elements} previews={previews} onTypeChange={changeElementType} onReparent={reparentElement} />
+                        <CanvasDecomposeLayerTree elements={elements} previews={previews} onTypeChange={changeElementType} onResolutionChange={changeElementResolution} onReparent={reparentElement} />
                     </div>
 
                     {extracting ? (
@@ -710,11 +747,41 @@ export function CanvasImageDecomposeDialog({ node, open, config, onClose, onOpen
                     ) : null}
                     <div className="flex flex-wrap gap-2">
                         <Button icon={<RotateCcw className="size-4" />} onClick={resetPositions}>{t("decompose.resetPositions")}</Button>
-                        <Button icon={<Download className="size-4" />} onClick={() => void exportZip()}>{t("decompose.exportZip")}</Button>
-                        <Button icon={<FileJson className="size-4" />} onClick={() => void exportJsonOnly()}>{t("decompose.exportJson")}</Button>
+                        <Button icon={<Download className="size-4" />} loading={exporting} onClick={() => void exportZip()}>{t("decompose.exportZip")}</Button>
+                        <Button icon={<FileJson className="size-4" />} disabled={exporting} onClick={() => void exportJsonOnly()}>{t("decompose.exportJson")}</Button>
                     </div>
                 </div>
             )}
+            <CanvasDecomposeRequestLog open={logsOpen} logs={requestLogs} fileBase={node?.title || t("decompose.title")} onClose={() => setLogsOpen(false)} />
         </Modal>
     );
+}
+
+async function hydrateCachedLayers(cache: DecomposeCache) {
+    const entries = await Promise.all(
+        (cache.layers || []).map(async (item): Promise<[string, ExtractedLayer] | null> => {
+            if (!item.storageKey) return null;
+            try {
+                const blob = await getImageBlob(item.storageKey);
+                if (!blob) return null;
+                const url = await resolveImageUrl(item.storageKey);
+                if (!url) return null;
+                const image = await loadImage(url);
+                return [
+                    item.elementId,
+                    {
+                        elementId: item.elementId,
+                        width: item.width,
+                        height: item.height,
+                        canvas: drawToSize(image, item.width, item.height),
+                        blob,
+                        uploaded: { url, storageKey: item.storageKey, width: item.width, height: item.height, bytes: blob.size, mimeType: blob.type },
+                    },
+                ];
+            } catch {
+                return null;
+            }
+        }),
+    );
+    return Object.fromEntries(entries.filter((entry): entry is [string, ExtractedLayer] => Boolean(entry)));
 }

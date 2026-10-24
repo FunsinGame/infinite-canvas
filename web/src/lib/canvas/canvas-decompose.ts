@@ -1,5 +1,6 @@
 import { saveAs } from "file-saver";
 
+import { imageSizePresets, inferMediaRatio } from "@/lib/media-size";
 import { createZip } from "@/lib/zip";
 import type { UploadedImage } from "@/services/image-storage";
 
@@ -14,12 +15,14 @@ export type ElementBox = {
 };
 
 export type DecomposeElementType = "image" | "text" | "mask";
+export type DecomposeResolution = "1k" | "2k";
 
 export type DecomposeElement = {
     id: string;
     name: string;
     description: string;
     type: DecomposeElementType;
+    resolution: DecomposeResolution;
     box: ElementBox;
     parentId: string | null;
 };
@@ -31,6 +34,31 @@ export type ExtractedLayer = {
     canvas: HTMLCanvasElement;
     blob: Blob;
     uploaded: UploadedImage;
+};
+
+export type DecomposeCacheLayer = {
+    elementId: string;
+    storageKey?: string;
+    width: number;
+    height: number;
+};
+
+export type DecomposeCache = {
+    width: number;
+    height: number;
+    elements: DecomposeElement[];
+    layers: DecomposeCacheLayer[];
+    offsets: Record<string, { dx: number; dy: number }>;
+    baseStorageKey?: string;
+    sourceNodeId?: string;
+    textModel?: string;
+    imageModel?: string;
+};
+
+export type DecomposeExportPayload = {
+    sourceNodeId: string;
+    cache: DecomposeCache;
+    baseBlob: Blob;
 };
 
 export type LayerExportEntry = {
@@ -67,10 +95,42 @@ export function fitAiSize(width: number, height: number) {
     return { width: Math.max(1, Math.round(width * scale)), height: Math.max(1, Math.round(height * scale)) };
 }
 
+/** Request the preset of the selected 1K/2K tier that matches the element aspect ratio. */
+export function getElementRequestSize(width: number, height: number, resolution: DecomposeResolution) {
+    const ratio = inferMediaRatio(`${Math.max(1, Math.round(width))}x${Math.max(1, Math.round(height))}`);
+    return imageSizePresets[resolution][ratio];
+}
+
 export function drawToSize(source: CanvasImageSource, width: number, height: number) {
     const canvas = createCanvas(width, height);
     canvas.getContext("2d")!.drawImage(source, 0, 0, width, height);
     return canvas;
+}
+
+/** Crop the transparent margins some models add when the requested aspect differs from the element. */
+export function trimTransparent(source: HTMLImageElement | HTMLCanvasElement, alphaThreshold = 8) {
+    const width = source instanceof HTMLCanvasElement ? source.width : source.naturalWidth;
+    const height = source instanceof HTMLCanvasElement ? source.height : source.naturalHeight;
+    const canvas = drawToSize(source, width, height);
+    const data = canvas.getContext("2d")!.getImageData(0, 0, width, height).data;
+    let left = width;
+    let top = height;
+    let right = -1;
+    let bottom = -1;
+    for (let y = 0; y < height; y += 1) {
+        for (let x = 0; x < width; x += 1) {
+            if (data[(y * width + x) * 4 + 3] <= alphaThreshold) continue;
+            if (x < left) left = x;
+            if (x > right) right = x;
+            if (y < top) top = y;
+            bottom = y;
+        }
+    }
+    if (right < left || bottom < top) return null;
+    if (left === 0 && top === 0 && right === width - 1 && bottom === height - 1) return canvas;
+    const trimmed = createCanvas(right - left + 1, bottom - top + 1);
+    trimmed.getContext("2d")!.drawImage(canvas, left, top, trimmed.width, trimmed.height, 0, 0, trimmed.width, trimmed.height);
+    return trimmed;
 }
 
 export function boxArea(box: ElementBox) {
@@ -192,19 +252,6 @@ export function createElementPreviewDataUrl(image: HTMLImageElement | HTMLCanvas
     return canvas.toDataURL("image/jpeg", 0.86);
 }
 
-/** Black canvas with white remove-mask rectangles. Boxes are already in the target coordinate space. */
-export function createMaskDataUrl(width: number, height: number, boxes: ElementBox[]) {
-    const canvas = createCanvas(width, height);
-    const context = canvas.getContext("2d")!;
-    context.fillStyle = "#000";
-    context.fillRect(0, 0, canvas.width, canvas.height);
-    context.fillStyle = "#fff";
-    for (const box of boxes) {
-        context.fillRect(box.x, box.y, box.width, box.height);
-    }
-    return canvas.toDataURL("image/png");
-}
-
 export function cropBox(source: HTMLCanvasElement | HTMLImageElement, box: ElementBox) {
     const canvas = createCanvas(box.width, box.height);
     canvas.getContext("2d")!.drawImage(source, box.x, box.y, box.width, box.height, 0, 0, canvas.width, canvas.height);
@@ -221,11 +268,52 @@ export function sanitizeFileName(value: string) {
     return value.replace(/[\\/:*?"<>|]+/g, "-").replace(/\s+/g, " ").trim().slice(0, 60) || "layer";
 }
 
-export async function downloadLayerZip(entries: LayerExportEntry[], fileBase: string) {
+export async function downloadZip(entries: LayerExportEntry[], fileName: string) {
     const zip = await createZip(entries.map((entry) => ({ name: entry.name, data: entry.blob })));
-    saveAs(zip, `${sanitizeFileName(fileBase)}-layers.zip`);
+    saveAs(zip, fileName);
+}
+
+export async function downloadLayerZip(entries: LayerExportEntry[], fileBase: string) {
+    await downloadZip(entries, `${sanitizeFileName(fileBase)}-layers.zip`);
 }
 
 export function downloadJson(value: unknown, fileBase: string) {
     saveAs(new Blob([JSON.stringify(value, null, 2)], { type: "application/json" }), `${sanitizeFileName(fileBase)}-layers.json`);
+}
+
+export function buildDecomposeExport(cache: DecomposeCache) {
+    const order = getElementExtractionOrder(cache.elements);
+    const indexMap = new Map(order.map((element, index) => [element.id, index + 1]));
+    const layerIds = new Set((cache.layers || []).map((layer) => layer.elementId));
+    const fileById = new Map<string, string>();
+    order.forEach((element, index) => {
+        if (element.type !== "image" || !layerIds.has(element.id)) return;
+        fileById.set(element.id, `layers/${String(index + 1).padStart(2, "0")}-${sanitizeFileName(element.name)}.png`);
+    });
+    const json = {
+        version: 1,
+        image: { width: cache.width, height: cache.height },
+        base: "base.png",
+        elements: order.map((element) => {
+            const offset = (cache.offsets || {})[element.id] || { dx: 0, dy: 0 };
+            return {
+                id: element.id,
+                name: element.name,
+                text: element.type === "text" ? element.name : null,
+                description: element.description,
+                type: element.type,
+                parentId: element.parentId,
+                depth: getElementDepth(cache.elements, element.id),
+                order: indexMap.get(element.id),
+                box: {
+                    x: Math.round(element.box.x + offset.dx),
+                    y: Math.round(element.box.y + offset.dy),
+                    width: Math.round(element.box.width),
+                    height: Math.round(element.box.height),
+                },
+                image: fileById.get(element.id) || null,
+            };
+        }),
+    };
+    return { json, fileById };
 }

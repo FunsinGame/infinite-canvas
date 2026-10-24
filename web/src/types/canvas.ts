@@ -1,3 +1,5 @@
+import type { DecomposeCache } from "@/lib/canvas/canvas-decompose";
+
 export type Position = {
     x: number;
     y: number;
@@ -96,6 +98,7 @@ export type CanvasNodeMetadata = {
     videoTaskProvider?: "openai" | "gemini";
     groupId?: string;
     decomposition?: CanvasDecompositionMeta;
+    decompose?: DecomposeCache;
     interactive?: boolean; // Plugin node interaction/move state; see CanvasNodeDefinition.interactionToggle.
 };
 

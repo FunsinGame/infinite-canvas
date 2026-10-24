@@ -9,16 +9,18 @@ import {
     isElementDescendant,
     type DecomposeElement,
     type DecomposeElementType,
+    type DecomposeResolution,
 } from "@/lib/canvas/canvas-decompose";
 
 type Props = {
     elements: DecomposeElement[];
     previews: Record<string, string>;
     onTypeChange: (id: string, type: DecomposeElementType) => void;
+    onResolutionChange: (id: string, resolution: DecomposeResolution) => void;
     onReparent: (id: string, parentId: string | null) => void;
 };
 
-export function CanvasDecomposeLayerTree({ elements, previews, onTypeChange, onReparent }: Props) {
+export function CanvasDecomposeLayerTree({ elements, previews, onTypeChange, onResolutionChange, onReparent }: Props) {
     const { t } = useTranslation();
     const rows = useMemo(() => flattenElementTree(elements), [elements]);
     const orderMap = useMemo(() => new Map(getElementExtractionOrder(elements).filter((element) => element.type === "image").map((element, index) => [element.id, index + 1])), [elements]);
@@ -132,6 +134,17 @@ export function CanvasDecomposeLayerTree({ elements, previews, onTypeChange, onR
                                     { value: "mask", label: t("decompose.typeMask") },
                                 ]}
                                 onChange={(value) => onTypeChange(element.id, value as DecomposeElementType)}
+                            />
+
+                            <Segmented
+                                size="small"
+                                className="shrink-0 text-xs"
+                                value={element.resolution}
+                                options={[
+                                    { value: "1k", label: "1K", tooltip: t("decompose.requestResolutionHint", { resolution: "1K" }) },
+                                    { value: "2k", label: "2K", tooltip: t("decompose.requestResolutionHint", { resolution: "2K" }) },
+                                ]}
+                                onChange={(value) => onResolutionChange(element.id, value as DecomposeResolution)}
                             />
                         </div>
                     );

@@ -9,7 +9,7 @@ import { requestEdit, requestGeneration, requestImageQuestion } from "@/services
 import { requestAudioGeneration, storeGeneratedAudio } from "@/services/api/audio";
 import { createVideoGenerationTask, isVideoTaskFailed, storeGeneratedVideo, waitForVideoGenerationTask } from "@/services/api/video";
 import { defaultConfig, useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
-import { ensureImagePreview, uploadImage } from "@/services/image-storage";
+import { ensureImagePreview, getImageBlob, imageToDataUrl, uploadImage } from "@/services/image-storage";
 import { uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { nanoid } from "nanoid";
 import { getDataUrlByteSize, readImageMeta } from "@/lib/image-utils";
@@ -17,7 +17,8 @@ import { imageReferenceLabel } from "@/lib/image-reference-prompt";
 import { canvasThemes, type CanvasBackgroundMode } from "@/lib/canvas-theme";
 import { useAssetStore } from "@/stores/use-asset-store";
 import { useThemeStore } from "@/stores/use-theme-store";
-import { cropDataUrl, splitDataUrl, upscaleDataUrl } from "@/lib/canvas/canvas-image-data";
+import { cropDataUrl, flattenImageDataUrl, splitDataUrl, upscaleDataUrl } from "@/lib/canvas/canvas-image-data";
+import { buildDecomposeExport, downloadLayerZip, type DecomposeExportPayload, type LayerExportEntry } from "@/lib/canvas/canvas-decompose";
 import { fitNodeSize, nodeSizeFromRatio } from "@/lib/canvas/canvas-node-size";
 import { captureVideoFrame, type VideoFramePosition } from "@/lib/canvas/canvas-video-frame";
 import { App, Button, Modal } from "antd";
@@ -28,6 +29,7 @@ import { CanvasConfigNodePanel } from "@/components/canvas/canvas-config-node-pa
 import { CanvasNodeContextMenu } from "@/components/canvas/canvas-context-menu";
 import { CanvasNodeAngleDialog, type CanvasImageAngleParams } from "@/components/canvas/canvas-node-angle-dialog";
 import { CanvasNodeCropDialog, type CanvasImageCropRect } from "@/components/canvas/canvas-node-crop-dialog";
+import { CanvasNodeCutoutDialog, type CanvasImageCutoutPayload } from "@/components/canvas/canvas-node-cutout-dialog";
 import { CanvasImageDecomposeDialog } from "@/components/canvas/canvas-image-decompose-dialog";
 import { CanvasNodeMaskEditDialog, type CanvasImageMaskEditPayload } from "@/components/canvas/canvas-node-mask-edit-dialog";
 import { CanvasNodeSplitDialog, type CanvasImageSplitParams } from "@/components/canvas/canvas-node-split-dialog";
@@ -257,6 +259,7 @@ function InfiniteCanvasPage() {
     const [infoNodeId, setInfoNodeId] = useState<string | null>(null);
     const [pluginManagerOpen, setPluginManagerOpen] = useState(false);
     const [cropNodeId, setCropNodeId] = useState<string | null>(null);
+    const [cutoutNodeId, setCutoutNodeId] = useState<string | null>(null);
     const [maskEditNodeId, setMaskEditNodeId] = useState<string | null>(null);
     const [splitNodeId, setSplitNodeId] = useState<string | null>(null);
     const [decomposeNodeId, setDecomposeNodeId] = useState<string | null>(null);
@@ -733,6 +736,7 @@ function InfiniteCanvasPage() {
     const toolbarNode = (toolbarNodeId ? nodeById.get(toolbarNodeId) || null : null) || (singleSelectedNodeId ? nodeById.get(singleSelectedNodeId) || null : null);
     const infoNode = infoNodeId ? nodeById.get(infoNodeId) || null : null;
     const cropNode = cropNodeId ? nodeById.get(cropNodeId) || null : null;
+    const cutoutNode = cutoutNodeId ? nodeById.get(cutoutNodeId) || null : null;
     const maskEditNode = maskEditNodeId ? nodeById.get(maskEditNodeId) || null : null;
     const splitNode = splitNodeId ? nodeById.get(splitNodeId) || null : null;
     const decomposeNode = decomposeNodeId ? nodeById.get(decomposeNodeId) || null : null;
@@ -1350,8 +1354,8 @@ function InfiniteCanvasPage() {
         if (wasClick && clickedNodeId) {
             const clickedNode = nodesRef.current.find((node) => node.id === clickedNodeId);
             const clickedDefinition = clickedNode ? getNodeDefinition(clickedNode.type) : undefined;
-            if (clickedDefinition?.hidePanel) {
-                // Clicking a display-only plugin node selects it without opening a lower panel.
+            if (clickedDefinition?.hidePanel || clickedNode?.metadata?.decompose) {
+                // Display-only nodes (plugin nodes and decompose results) select without opening the prompt panel.
                 setDialogNodeId((current) => (current === clickedNodeId ? current : null));
             } else if (clickedNode?.type !== CanvasNodeType.Group) {
                 setDialogNodeId(clickedNodeId);
@@ -1699,6 +1703,7 @@ function InfiniteCanvasPage() {
                 setDialogNodeId(null);
                 setInfoNodeId(null);
                 setCropNodeId(null);
+                setCutoutNodeId(null);
                 setMaskEditNodeId(null);
                 setPendingConnectionCreate(null);
             }
@@ -1839,10 +1844,51 @@ function InfiniteCanvasPage() {
         setNodes((prev) => prev.map((node) => (node.id === nodeId ? applyNodeConfigPatch(node, patch) : node)));
     }, []);
 
-    const downloadNodeImage = useCallback((node: CanvasNodeData) => {
-        if ((node.type !== CanvasNodeType.Image && node.type !== CanvasNodeType.Video && node.type !== CanvasNodeType.Audio) || !node.metadata?.content) return;
-        saveAs(node.metadata.content, `canvas-${node.type}-${node.id}.${node.type === CanvasNodeType.Video ? "mp4" : node.type === CanvasNodeType.Audio ? audioExtension(node.metadata.mimeType) : imageExtension(node.metadata.content)}`);
-    }, []);
+    const downloadDecomposeResult = useCallback(
+        async (node: CanvasNodeData) => {
+            const cache = node.metadata?.decompose;
+            if (!cache) return;
+            try {
+                const baseKey = cache.baseStorageKey || node.metadata?.storageKey;
+                const baseBlob = baseKey ? await getImageBlob(baseKey) : null;
+                if (!baseBlob) throw new Error(t("decompose.failed"));
+                const layerBlobs = new Map<string, Blob>();
+                const cachedLayers = cache.layers || [];
+                await Promise.all(
+                    cachedLayers.map(async (layer) => {
+                        if (!layer.storageKey) return;
+                        const blob = await getImageBlob(layer.storageKey);
+                        if (blob) layerBlobs.set(layer.elementId, blob);
+                    }),
+                );
+                const layers = cachedLayers.filter((layer) => layerBlobs.has(layer.elementId));
+                const { json, fileById } = buildDecomposeExport({ ...cache, layers });
+                const entries: LayerExportEntry[] = [{ name: "base.png", blob: baseBlob }];
+                for (const [elementId, fileName] of fileById) {
+                    const blob = layerBlobs.get(elementId);
+                    if (blob) entries.push({ name: fileName, blob });
+                }
+                entries.push({ name: "layers.json", blob: new Blob([JSON.stringify(json, null, 2)], { type: "application/json" }) });
+                await downloadLayerZip(entries, node.title || t("decompose.title"));
+                message.success(t("decompose.exportDone"));
+            } catch (error) {
+                message.error(error instanceof Error ? error.message : t("decompose.failed"));
+            }
+        },
+        [message, t],
+    );
+
+    const downloadNodeImage = useCallback(
+        (node: CanvasNodeData) => {
+            if (node.metadata?.decompose) {
+                void downloadDecomposeResult(node);
+                return;
+            }
+            if ((node.type !== CanvasNodeType.Image && node.type !== CanvasNodeType.Video && node.type !== CanvasNodeType.Audio) || !node.metadata?.content) return;
+            saveAs(node.metadata.content, `canvas-${node.type}-${node.id}.${node.type === CanvasNodeType.Video ? "mp4" : node.type === CanvasNodeType.Audio ? audioExtension(node.metadata.mimeType) : imageExtension(node.metadata.content)}`);
+        },
+        [downloadDecomposeResult],
+    );
 
     const downloadBatchImage = useCallback((node: CanvasNodeData, imageId: string) => {
         const image = node.metadata?.images?.find((item) => item.id === imageId);
@@ -1994,6 +2040,68 @@ function InfiniteCanvasPage() {
         setCropNodeId(null);
     }, []);
 
+    const cutoutImageNode = useCallback(
+        async (node: CanvasNodeData, payload: CanvasImageCutoutPayload) => {
+            if (!node.metadata?.content) return;
+            setCutoutNodeId(null);
+            const cutout = await uploadImage(payload.dataUrl);
+            const generationConfig = { ...buildGenerationConfig(effectiveConfig, node, "image"), count: "1", size: "auto", background: "transparent" };
+            const repairing = payload.aiRepair && isAiConfigReady(generationConfig, generationConfig.model);
+            const size = fitNodeSize(cutout.width, cutout.height, node.width, node.height);
+            const childId = nanoid();
+            const child: CanvasNodeData = {
+                id: childId,
+                type: CanvasNodeType.Image,
+                title: t("canvas.projectPage.cutoutResult"),
+                position: { x: node.position.x + node.width + 96, y: node.position.y },
+                width: size.width,
+                height: size.height,
+                metadata: {
+                    ...imageMetadata(cutout),
+                    prompt: node.metadata?.prompt,
+                    ...(repairing ? { status: NODE_STATUS_LOADING, errorDetails: undefined } : {}),
+                },
+            };
+            setNodes((prev) => [...prev, child]);
+            setConnections((prev) => [...prev, { id: nanoid(), fromNodeId: node.id, toNodeId: childId }]);
+            setSelectedNodeIds(new Set([childId]));
+            setSelectedConnectionId(null);
+            setDialogNodeId(childId);
+            if (!payload.aiRepair) return;
+            if (!repairing) {
+                message.warning(t("canvas.projectPage.cutoutNoConfig"));
+                return;
+            }
+            setRunningNodeId(childId);
+            const controller = startGenerationRequest(childId, node.id, childId);
+            try {
+                const repaired = await requestEdit(
+                    generationConfig,
+                    t("canvas.projectPage.cutoutRepairPrompt"),
+                    [{ id: childId, name: `${node.title || node.id}-cutout.png`, type: cutout.mimeType || "image/png", dataUrl: cutout.url, storageKey: cutout.storageKey }],
+                    { signal: controller.signal },
+                ).then((items) => items[0]);
+                const repairedDataUrl = await imageToDataUrl({ dataUrl: repaired.dataUrl }, { signal: controller.signal });
+                const finalDataUrl = payload.transparentBackground ? repairedDataUrl : await flattenImageDataUrl(repairedDataUrl);
+                const uploaded = await uploadImage(finalDataUrl, { signal: controller.signal });
+                const nextSize = fitNodeSize(uploaded.width, uploaded.height, node.width, node.height);
+                setNodes((prev) =>
+                    prev.map((item) =>
+                        item.id === childId ? { ...item, width: nextSize.width, height: nextSize.height, metadata: { ...item.metadata, ...imageMetadata(uploaded), prompt: node.metadata?.prompt, errorDetails: undefined } } : item,
+                    ),
+                );
+            } catch (error) {
+                if (isGenerationCanceled(error)) return;
+                message.warning(t("canvas.projectPage.cutoutRepairFailed"));
+                setNodes((prev) => prev.map((item) => (item.id === childId ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_SUCCESS } } : item)));
+            } finally {
+                finishGenerationRequest(childId, controller);
+                setRunningNodeId(null);
+            }
+        },
+        [effectiveConfig, finishGenerationRequest, isAiConfigReady, message, startGenerationRequest, t],
+    );
+
     const splitImageNode = useCallback(
         async (node: CanvasNodeData, params: CanvasImageSplitParams) => {
             if (!node.metadata?.content) return;
@@ -2028,6 +2136,44 @@ function InfiniteCanvasPage() {
             setSelectedConnectionId(null);
             setDialogNodeId(null);
             message.success(t("canvas.projectPage.splitSuccess", { count: childNodes.length }));
+        },
+        [message, t],
+    );
+
+    const createDecomposeResultNode = useCallback(
+        async ({ sourceNodeId, cache, baseBlob }: DecomposeExportPayload) => {
+            const source = nodesRef.current.find((node) => node.id === sourceNodeId);
+            if (!source) return false;
+            try {
+                const base = await uploadImage(baseBlob);
+                const childId = nanoid();
+                const width = source.width;
+                const height = source.height;
+                const x = source.position.x + source.width + 96;
+                let y = source.position.y;
+                while (nodesRef.current.some((node) => node.position.x < x + width && node.position.x + node.width > x && node.position.y < y + height && node.position.y + node.height > y)) y += height + 24;
+                const child: CanvasNodeData = {
+                    id: childId,
+                    type: CanvasNodeType.Image,
+                    title: source.metadata?.decompose ? source.title : t("decompose.groupTitle", { name: source.title || t("assets.kinds.image") }),
+                    position: { x, y },
+                    width,
+                    height,
+                    metadata: {
+                        ...imageMetadata(base),
+                        decompose: { ...cache, baseStorageKey: base.storageKey, sourceNodeId },
+                    },
+                };
+                setNodes((prev) => [...prev, child]);
+                setConnections((prev) => [...prev, { id: nanoid(), fromNodeId: sourceNodeId, toNodeId: childId }]);
+                setSelectedNodeIds(new Set([childId]));
+                setSelectedConnectionId(null);
+                setDialogNodeId(null);
+                return true;
+            } catch (error) {
+                message.error(error instanceof Error ? error.message : t("decompose.failed"));
+                return false;
+            }
         },
         [message, t],
     );
@@ -3094,6 +3240,12 @@ function InfiniteCanvasPage() {
         setHoveredNodeId((current) => (current === nodeId ? null : current));
     }, []);
     const handleNodeViewImage = useCallback((node: CanvasNodeData, imageId?: string) => {
+        if (!imageId && node.metadata?.decompose) {
+            setPreviewNodeId(null);
+            setPreviewImageId(null);
+            setDecomposeNodeId(node.id);
+            return;
+        }
         setPreviewNodeId(node.id);
         setPreviewImageId(imageId || null);
     }, []);
@@ -3277,7 +3429,7 @@ function InfiniteCanvasPage() {
                             isConnectionTarget={connectionTargetNodeId === node.id}
                             isConnecting={Boolean(connectingParams)}
                             referenceSelectionState={!referencePickerNodeId ? undefined : node.id === referencePickerNodeId ? "target" : referenceConnectedNodeIds.has(node.id) || !isCanvasReferenceNode(node, nodes) ? "disabled" : "available"}
-                            showPanel={!isNodeResizing && dialogNodeId === node.id && !selectionBox && !getNodeDefinition(node.type)?.hidePanel}
+                            showPanel={!isNodeResizing && dialogNodeId === node.id && !selectionBox && !getNodeDefinition(node.type)?.hidePanel && !node.metadata?.decompose}
                             groupChildCount={groupChildCountById.get(node.id) || 0}
                             isGroupDropTarget={dropTargetGroupId === node.id}
                             batchExpanded={expandedBatchNodeIds.has(node.id)}
@@ -3376,6 +3528,7 @@ function InfiniteCanvasPage() {
                     onSaveAsset={(node) => void saveNodeAsset(node)}
                     onMaskEdit={(node) => setMaskEditNodeId(node.id)}
                     onCrop={(node) => setCropNodeId(node.id)}
+                    onCutout={(node) => setCutoutNodeId(node.id)}
                     onSplit={(node) => setSplitNodeId(node.id)}
                     onUpscale={(node) => setUpscaleNodeId(node.id)}
                     onSuperResolve={(node) => setSuperResolveNodeId(node.id)}
@@ -3466,6 +3619,8 @@ function InfiniteCanvasPage() {
 
                 {cropNode?.metadata?.content ? <CanvasNodeCropDialog dataUrl={cropNode.metadata.content} open={Boolean(cropNode)} onClose={() => setCropNodeId(null)} onConfirm={(crop) => void cropImageNode(cropNode!, crop)} /> : null}
 
+                {cutoutNode?.metadata?.content ? <CanvasNodeCutoutDialog dataUrl={cutoutNode.metadata.content} open={Boolean(cutoutNode)} onClose={() => setCutoutNodeId(null)} onConfirm={(payload) => void cutoutImageNode(cutoutNode!, payload)} /> : null}
+
                 {maskEditNode?.metadata?.content ? (
                     <CanvasNodeMaskEditDialog dataUrl={maskEditNode.metadata.content} open={Boolean(maskEditNode)} onClose={() => setMaskEditNodeId(null)} onConfirm={(payload) => void maskEditImageNode(maskEditNode!, payload)} />
                 ) : null}
@@ -3478,6 +3633,7 @@ function InfiniteCanvasPage() {
                     config={buildGenerationConfig(effectiveConfig, decomposeNode ?? undefined, "image")}
                     onClose={() => setDecomposeNodeId(null)}
                     onOpenConfig={() => openConfigDialog(true)}
+                    onExported={createDecomposeResultNode}
                 />
 
                 {upscaleNode?.metadata?.content ? (

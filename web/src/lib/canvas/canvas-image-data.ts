@@ -1,3 +1,5 @@
+import { trimTransparent } from "./canvas-decompose";
+
 export type ImageCropRect = {
     x: number;
     y: number;
@@ -43,6 +45,63 @@ export async function cropDataUrl(dataUrl: string, crop?: ImageCropRect) {
     const sx = Math.max(0, Math.floor((image.width - size) / 2));
     const sy = Math.max(0, Math.floor((image.height - size) / 2));
     return drawCrop(image, sx, sy, size, size);
+}
+
+export async function cutoutRectDataUrl(dataUrl: string, rect: ImageCropRect, transparentBackground: boolean) {
+    const image = await loadImage(dataUrl);
+    const sx = clamp(Math.round(rect.x * image.width), 0, image.width - 1);
+    const sy = clamp(Math.round(rect.y * image.height), 0, image.height - 1);
+    const width = clamp(Math.round(rect.width * image.width), 1, image.width - sx);
+    const height = clamp(Math.round(rect.height * image.height), 1, image.height - sy);
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext("2d");
+    if (!context) return dataUrl;
+    if (!transparentBackground) {
+        context.fillStyle = "#ffffff";
+        context.fillRect(0, 0, width, height);
+    }
+    context.drawImage(image, sx, sy, width, height, 0, 0, width, height);
+    return canvas.toDataURL("image/png");
+}
+
+export async function cutoutMaskDataUrl(dataUrl: string, maskDataUrl: string, transparentBackground: boolean) {
+    const [image, mask] = await Promise.all([loadImage(dataUrl), loadImage(maskDataUrl)]);
+    const canvas = document.createElement("canvas");
+    canvas.width = image.width;
+    canvas.height = image.height;
+    const context = canvas.getContext("2d");
+    if (!context) return null;
+    context.drawImage(image, 0, 0, canvas.width, canvas.height);
+    context.globalCompositeOperation = "destination-in";
+    context.drawImage(mask, 0, 0, canvas.width, canvas.height);
+    context.globalCompositeOperation = "source-over";
+    const trimmed = trimTransparent(canvas);
+    if (!trimmed) return null;
+    if (transparentBackground) return trimmed.toDataURL("image/png");
+    const output = document.createElement("canvas");
+    output.width = trimmed.width;
+    output.height = trimmed.height;
+    const outputContext = output.getContext("2d");
+    if (!outputContext) return trimmed.toDataURL("image/png");
+    outputContext.fillStyle = "#ffffff";
+    outputContext.fillRect(0, 0, output.width, output.height);
+    outputContext.drawImage(trimmed, 0, 0);
+    return output.toDataURL("image/png");
+}
+
+export async function flattenImageDataUrl(dataUrl: string, color = "#ffffff") {
+    const image = await loadImage(dataUrl);
+    const canvas = document.createElement("canvas");
+    canvas.width = image.width;
+    canvas.height = image.height;
+    const context = canvas.getContext("2d");
+    if (!context) return dataUrl;
+    context.fillStyle = color;
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    context.drawImage(image, 0, 0);
+    return canvas.toDataURL("image/png");
 }
 
 export async function splitDataUrl(dataUrl: string, params: ImageSplitParams): Promise<ImageSplitPiece[]> {
@@ -171,4 +230,8 @@ function loadImage(dataUrl: string) {
         image.onload = () => resolve(image);
         image.src = dataUrl;
     });
+}
+
+function clamp(value: number, min: number, max: number) {
+    return Math.min(max, Math.max(min, value));
 }

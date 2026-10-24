@@ -9,11 +9,9 @@ type DragMode = "move" | "nw" | "ne" | "sw" | "se";
 type DragState = {
     id: string;
     mode: DragMode;
-    startX: number;
-    startY: number;
+    pointerX: number;
+    pointerY: number;
     startBox: ElementBox;
-    rect: DOMRect;
-    zoom: number;
 };
 
 type ViewState = { zoom: number; x: number; y: number };
@@ -23,10 +21,6 @@ type PanState = { startX: number; startY: number; x: number; y: number };
 type CreateState = {
     startX: number;
     startY: number;
-    rect: DOMRect;
-    zoom: number;
-    viewX: number;
-    viewY: number;
 };
 
 type Props = {
@@ -48,6 +42,7 @@ export function CanvasDecomposeBoxEditor({ imageUrl, width, height, elements, se
     const dragRef = useRef<DragState | null>(null);
     const panRef = useRef<PanState | null>(null);
     const createRef = useRef<CreateState | null>(null);
+    const onChangeRef = useRef(onChange);
     const [view, setView] = useState<ViewState>({ zoom: 1, x: 0, y: 0 });
     const viewRef = useRef(view);
     const [panning, setPanning] = useState(false);
@@ -57,6 +52,10 @@ export function CanvasDecomposeBoxEditor({ imageUrl, width, height, elements, se
         viewRef.current = next;
         setView(next);
     };
+
+    useEffect(() => {
+        onChangeRef.current = onChange;
+    }, [onChange]);
 
     useEffect(() => {
         const next = { zoom: 1, x: 0, y: 0 };
@@ -73,7 +72,6 @@ export function CanvasDecomposeBoxEditor({ imageUrl, width, height, elements, se
         if (!viewport) return;
 
         const handleWheel = (event: WheelEvent) => {
-            if (createRef.current) return;
             event.preventDefault();
             const rect = viewport.getBoundingClientRect();
             if (!rect.width || !rect.height) return;
@@ -90,11 +88,23 @@ export function CanvasDecomposeBoxEditor({ imageUrl, width, height, elements, se
             const contentX = (cursorX - current.x) / current.zoom;
             const contentY = (cursorY - current.y) / current.zoom;
             applyView(clampView({ zoom: nextZoom, x: cursorX - contentX * nextZoom, y: cursorY - contentY * nextZoom }, rect));
+
+            const create = createRef.current;
+            if (create) {
+                const point = imagePoint(event.clientX, event.clientY, rect, viewRef.current, width, height);
+                setDraft(boxBetween(create.startX, create.startY, point.x, point.y));
+                return;
+            }
+            const drag = dragRef.current;
+            if (drag) {
+                const point = imagePoint(event.clientX, event.clientY, rect, viewRef.current, width, height);
+                onChangeRef.current(drag.id, computeDragBox(drag, point, width, height));
+            }
         };
 
         viewport.addEventListener("wheel", handleWheel, { passive: false });
         return () => viewport.removeEventListener("wheel", handleWheel);
-    }, []);
+    }, [height, width]);
 
     useEffect(() => {
         const handleMove = (event: PointerEvent) => {
@@ -128,7 +138,9 @@ export function CanvasDecomposeBoxEditor({ imageUrl, width, height, elements, se
             const create = createRef.current;
             if (!create) return;
             event.preventDefault();
-            const point = toImagePoint(create, event.clientX, event.clientY, width, height);
+            const rect = containerRef.current?.getBoundingClientRect();
+            if (!rect) return;
+            const point = imagePoint(event.clientX, event.clientY, rect, viewRef.current, width, height);
             setDraft(boxBetween(create.startX, create.startY, point.x, point.y));
         };
 
@@ -137,7 +149,9 @@ export function CanvasDecomposeBoxEditor({ imageUrl, width, height, elements, se
             const create = createRef.current;
             if (!create) return;
             createRef.current = null;
-            const point = toImagePoint(create, event.clientX, event.clientY, width, height);
+            const rect = containerRef.current?.getBoundingClientRect();
+            if (!rect) return;
+            const point = imagePoint(event.clientX, event.clientY, rect, viewRef.current, width, height);
             const box = boxBetween(create.startX, create.startY, point.x, point.y);
             setDraft(null);
             if (box.width >= 8 && box.height >= 8) onCreate(box);
@@ -163,37 +177,10 @@ export function CanvasDecomposeBoxEditor({ imageUrl, width, height, elements, se
             const drag = dragRef.current;
             if (!drag) return;
             event.preventDefault();
-
-            const dx = ((event.clientX - drag.startX) / Math.max(1, drag.rect.width * drag.zoom)) * width;
-            const dy = ((event.clientY - drag.startY) / Math.max(1, drag.rect.height * drag.zoom)) * height;
-            const start = drag.startBox;
-            const minSize = 8;
-            let x = start.x;
-            let y = start.y;
-            let w = start.width;
-            let h = start.height;
-
-            if (drag.mode === "move") {
-                x = clamp(start.x + dx, 0, width - start.width);
-                y = clamp(start.y + dy, 0, height - start.height);
-            } else {
-                if (drag.mode === "nw" || drag.mode === "sw") {
-                    const right = start.x + start.width;
-                    x = clamp(start.x + dx, 0, right - minSize);
-                    w = right - x;
-                } else {
-                    w = clamp(start.width + dx, minSize, width - start.x);
-                }
-                if (drag.mode === "nw" || drag.mode === "ne") {
-                    const bottom = start.y + start.height;
-                    y = clamp(start.y + dy, 0, bottom - minSize);
-                    h = bottom - y;
-                } else {
-                    h = clamp(start.height + dy, minSize, height - start.y);
-                }
-            }
-
-            onChange(drag.id, { x: Math.round(x), y: Math.round(y), width: Math.max(minSize, Math.round(w)), height: Math.max(minSize, Math.round(h)) });
+            const rect = containerRef.current?.getBoundingClientRect();
+            if (!rect) return;
+            const point = imagePoint(event.clientX, event.clientY, rect, viewRef.current, width, height);
+            onChange(drag.id, computeDragBox(drag, point, width, height));
         };
 
         const handleUp = () => {
@@ -217,7 +204,8 @@ export function CanvasDecomposeBoxEditor({ imageUrl, width, height, elements, se
         onSelect(element.id);
         const rect = containerRef.current?.getBoundingClientRect();
         if (!rect) return;
-        dragRef.current = { id: element.id, mode, startX: event.clientX, startY: event.clientY, startBox: element.box, rect, zoom: viewRef.current.zoom };
+        const point = imagePoint(event.clientX, event.clientY, rect, viewRef.current, width, height);
+        dragRef.current = { id: element.id, mode, pointerX: point.x, pointerY: point.y, startBox: element.box };
     };
 
     const beginCreate = (event: ReactPointerEvent<HTMLImageElement>) => {
@@ -226,10 +214,8 @@ export function CanvasDecomposeBoxEditor({ imageUrl, width, height, elements, se
         onSelect(null);
         const rect = containerRef.current?.getBoundingClientRect();
         if (!rect) return;
-        const view = viewRef.current;
-        const source: CreateState = { startX: 0, startY: 0, rect, zoom: view.zoom, viewX: view.x, viewY: view.y };
-        const point = toImagePoint(source, event.clientX, event.clientY, width, height);
-        createRef.current = { ...source, startX: point.x, startY: point.y };
+        const point = imagePoint(event.clientX, event.clientY, rect, viewRef.current, width, height);
+        createRef.current = { startX: point.x, startY: point.y };
         setDraft({ x: point.x, y: point.y, width: 0, height: 0 });
     };
 
@@ -253,7 +239,8 @@ export function CanvasDecomposeBoxEditor({ imageUrl, width, height, elements, se
                 if (event.button === 1) event.preventDefault();
             }}
         >
-            <div className="absolute inset-0" style={{ transform: `translate3d(${view.x}px, ${view.y}px, 0) scale(${view.zoom})`, transformOrigin: "0 0", willChange: "transform" }}>
+            {/* Scale by layout size instead of a CSS transform: a transform-scaled layer keeps its old raster and turns the base image blurry when zoomed in. */}
+            <div className="absolute" style={{ left: view.x, top: view.y, width: `${view.zoom * 100}%`, height: `${view.zoom * 100}%` }}>
                 <img
                     src={imageUrl}
                     alt=""
@@ -323,10 +310,43 @@ function clampView(view: ViewState, rect: DOMRect): ViewState {
     return { zoom: view.zoom, x: Math.min(0, Math.max(minX, view.x)), y: Math.min(0, Math.max(minY, view.y)) };
 }
 
-function toImagePoint(source: CreateState, clientX: number, clientY: number, width: number, height: number) {
-    const x = ((clientX - source.rect.left - source.viewX) / source.zoom / Math.max(1, source.rect.width)) * width;
-    const y = ((clientY - source.rect.top - source.viewY) / source.zoom / Math.max(1, source.rect.height)) * height;
+function imagePoint(clientX: number, clientY: number, rect: DOMRect, view: ViewState, width: number, height: number) {
+    const x = ((clientX - rect.left - view.x) / view.zoom / Math.max(1, rect.width)) * width;
+    const y = ((clientY - rect.top - view.y) / view.zoom / Math.max(1, rect.height)) * height;
     return { x: clamp(x, 0, width), y: clamp(y, 0, height) };
+}
+
+function computeDragBox(drag: DragState, point: { x: number; y: number }, width: number, height: number): ElementBox {
+    const dx = point.x - drag.pointerX;
+    const dy = point.y - drag.pointerY;
+    const start = drag.startBox;
+    const minSize = 8;
+    let x = start.x;
+    let y = start.y;
+    let w = start.width;
+    let h = start.height;
+
+    if (drag.mode === "move") {
+        x = clamp(start.x + dx, 0, width - start.width);
+        y = clamp(start.y + dy, 0, height - start.height);
+    } else {
+        if (drag.mode === "nw" || drag.mode === "sw") {
+            const right = start.x + start.width;
+            x = clamp(start.x + dx, 0, right - minSize);
+            w = right - x;
+        } else {
+            w = clamp(start.width + dx, minSize, width - start.x);
+        }
+        if (drag.mode === "nw" || drag.mode === "ne") {
+            const bottom = start.y + start.height;
+            y = clamp(start.y + dy, 0, bottom - minSize);
+            h = bottom - y;
+        } else {
+            h = clamp(start.height + dy, minSize, height - start.y);
+        }
+    }
+
+    return { x: Math.round(x), y: Math.round(y), width: Math.max(minSize, Math.round(w)), height: Math.max(minSize, Math.round(h)) };
 }
 
 function boxBetween(startX: number, startY: number, endX: number, endY: number): ElementBox {
