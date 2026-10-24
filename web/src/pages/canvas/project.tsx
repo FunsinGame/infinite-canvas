@@ -159,6 +159,23 @@ export default function CanvasPage() {
     return <InfiniteCanvasPage />;
 }
 
+const CLIPBOARD_IMAGE_EXTENSION = /\.(png|jpe?g|gif|webp|bmp|avif|svg)$/i;
+
+// 浏览器会对剪贴板里的图片同时给出 items 和 files，部分来源（如资源管理器复制的文件）type 为空，只能按扩展名识别。
+function collectClipboardImageFiles(data: DataTransfer | null) {
+    if (!data) return [];
+    const files = Array.from(data.items)
+        .filter((item) => item.kind === "file")
+        .map((item) => item.getAsFile())
+        .filter((file): file is File => Boolean(file));
+
+    for (const file of Array.from(data.files)) {
+        if (!files.some((item) => item.name === file.name && item.size === file.size && item.type === file.type)) files.push(file);
+    }
+
+    return files.filter((file) => file.type.startsWith("image/") || (!file.type && CLIPBOARD_IMAGE_EXTENSION.test(file.name)));
+}
+
 function measureFocusFrame(container: HTMLDivElement | null, nodeId: string) {
     if (!container) return {};
     const nodeRect = container.querySelector<HTMLElement>(`[data-node-id="${nodeId}"]`)?.getBoundingClientRect();
@@ -1588,20 +1605,20 @@ function InfiniteCanvasPage() {
     useEffect(() => {
         const handlePaste = (event: ClipboardEvent) => {
             const target = event.target instanceof Element ? event.target : null;
-            if (target?.closest("input, textarea, select, [contenteditable='true'], [data-canvas-shortcuts-ignore]")) return;
+            // Agent 面板自己处理图片粘贴（作为对话附件），画布不抢。
+            if (target?.closest("[data-canvas-shortcuts-ignore]")) return;
             if (decomposeNodeId) return;
 
-            const imageFiles = Array.from(event.clipboardData?.items ?? [])
-                .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
-                .map((item) => item.getAsFile())
-                .filter((file): file is File => Boolean(file));
-
+            const imageFiles = collectClipboardImageFiles(event.clipboardData);
             if (imageFiles.length) {
+                // 输入框/文本域接不住图片，画布上粘贴图片始终建图片节点。
                 event.preventDefault();
                 pasteHandledRef.current = true;
                 void pasteClipboardImages(imageFiles);
                 return;
             }
+
+            if (target?.closest("input, textarea, select, [contenteditable='true']")) return;
 
             if (pasteCopiedNodes()) {
                 event.preventDefault();
@@ -1613,7 +1630,11 @@ function InfiniteCanvasPage() {
                 event.preventDefault();
                 pasteHandledRef.current = true;
                 message.success(t("canvas.projectPage.clipboardTextAdded"));
+                return;
             }
+
+            // 复制文件等剪贴板数据浏览器读不到图片时，至少给出反馈，避免 Ctrl+V 看起来没反应。
+            message.warning(t("canvas.projectPage.clipboardEmpty"));
         };
 
         document.addEventListener("paste", handlePaste);
