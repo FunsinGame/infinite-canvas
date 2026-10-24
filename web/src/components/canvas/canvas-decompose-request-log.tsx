@@ -19,6 +19,7 @@ export type DecomposeRequestLog = {
     prompt: string;
     systemPrompt: string;
     input: string;
+    inputs?: string[];
     output?: string;
     status: "loading" | "success" | "error";
     error?: string;
@@ -59,7 +60,8 @@ export function CanvasDecomposeRequestLog({ open, logs, fileBase, onClose, title
                 status: log.status,
                 error: log.error || null,
                 durationMs: log.durationMs ?? null,
-                input: files.input,
+                input: files.inputs[0],
+                inputs: files.inputs,
                 output: log.output ? files.output : null,
             };
         });
@@ -69,7 +71,10 @@ export function CanvasDecomposeRequestLog({ open, logs, fileBase, onClose, title
             const entries: LayerExportEntry[] = [];
             logs.forEach((log, index) => {
                 const files = logFileNames(log, index);
-                entries.push({ name: files.input, blob: dataUrlToFile({ id: log.id, name: files.input, type: "image/png", dataUrl: log.input }) });
+                const inputData = logInputs(log);
+                files.inputs.forEach((name, inputIndex) => {
+                    entries.push({ name, blob: dataUrlToFile({ id: `${log.id}-${inputIndex}`, name, type: "image/png", dataUrl: inputData[inputIndex] }) });
+                });
                 if (log.output) entries.push({ name: files.output, blob: dataUrlToFile({ id: log.id, name: files.output, type: "image/png", dataUrl: log.output }) });
             });
             entries.push({ name: "requests.json", blob: new Blob([JSON.stringify(serialize(), null, 2)], { type: "application/json" }) });
@@ -111,6 +116,7 @@ function RequestCard({ log, index, boxLabel }: { log: DecomposeRequestLog; index
     const { t } = useTranslation();
     const copyText = useCopyText();
     const files = logFileNames(log, index);
+    const inputs = logInputs(log);
     const statusColor = log.status === "success" ? "success" : log.status === "error" ? "error" : "processing";
 
     return (
@@ -130,7 +136,14 @@ function RequestCard({ log, index, boxLabel }: { log: DecomposeRequestLog; index
 
             <div className="mt-2 grid gap-3 lg:grid-cols-[260px_minmax(0,1fr)]">
                 <div className="space-y-2">
-                    <LogImage label={t("decompose.logs.input")} src={log.input} name={files.input} />
+                    {inputs.map((source, inputIndex) => (
+                        <LogImage
+                            key={inputIndex}
+                            label={inputs.length > 1 ? `${t("decompose.logs.input")} ${inputIndex + 1}` : t("decompose.logs.input")}
+                            src={source}
+                            name={files.inputs[inputIndex]}
+                        />
+                    ))}
                     {log.output ? (
                         <LogImage label={t("decompose.logs.output")} src={log.output} name={files.output} />
                     ) : (
@@ -192,8 +205,14 @@ function LogImage({ label, src, name }: { label: string; src: string; name: stri
     );
 }
 
+function logInputs(log: DecomposeRequestLog) {
+    return log.inputs?.length ? log.inputs : [log.input];
+}
+
 function logFileNames(log: DecomposeRequestLog, index: number) {
     const prefix = String(index + 1).padStart(2, "0");
     const base = sanitizeFileName(log.elementName);
-    return { input: `input/${prefix}-${base}.png`, output: `output/${prefix}-${base}.png` };
+    const count = logInputs(log).length;
+    const inputs = Array.from({ length: count }, (_, inputIndex) => (count > 1 ? `input/${prefix}-${base}-${inputIndex + 1}.png` : `input/${prefix}-${base}.png`));
+    return { inputs, output: `output/${prefix}-${base}.png` };
 }

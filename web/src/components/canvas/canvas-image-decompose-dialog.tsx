@@ -25,7 +25,7 @@ import {
     isElementDescendant,
     loadImage,
     sanitizeFileName,
-    trimTransparent,
+    trimByBackground,
     type DecomposeCache,
     type DecomposeElement,
     type DecomposeElementType,
@@ -429,7 +429,7 @@ export function CanvasImageDecomposeDialog({ node, open, config, onClose, onOpen
                     const inputDataUrl = aiSource.toDataURL("image/png");
                     const references: ReferenceImage[] = [{ id: element.id, name: `${sanitizeFileName(element.name)}.png`, type: "image/png", dataUrl: inputDataUrl }];
                     const prompt = childBoxes.length ? t("decompose.cutoutInpaintPrompt") : t("decompose.cutoutPrompt");
-                    const requestSize = getElementRequestSize(element.box.width, element.box.height, element.resolution);
+                    const requestSize = getElementRequestSize(element.resolution);
                     const systemPrompt = configRef.current.systemPrompt;
                     const editConfig = { ...configRef.current, model: imageModel, count: "1", size: requestSize, background: "transparent" };
                     setRequestLogs((current) => [
@@ -441,7 +441,7 @@ export function CanvasImageDecomposeDialog({ node, open, config, onClose, onOpen
                     if (!result[0]) throw new Error(t("decompose.failed"));
                     const resultUrl = await imageToDataUrl({ dataUrl: result[0].dataUrl }, { signal: controller.signal });
                     const resultImage = await loadImage(resultUrl);
-                    const trimmedResult = trimTransparent(resultImage);
+                    const trimmedResult = trimByBackground(resultImage);
                     if (!trimmedResult) throw new Error(t("decompose.emptyResult"));
                     canvas = drawToSize(trimmedResult, element.box.width, element.box.height);
                     setRequestLogs((current) => current.map((log) => (log.id === logId ? { ...log, status: "success", output: resultUrl, durationMs: Date.now() - startedAt } : log)));

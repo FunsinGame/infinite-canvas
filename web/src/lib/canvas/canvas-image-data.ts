@@ -52,98 +52,10 @@ export async function cropDataUrl(dataUrl: string, crop?: ImageCropRect) {
     return drawCrop(image, sx, sy, size, size);
 }
 
-export async function cutoutRectDataUrl(dataUrl: string, rect: ImageCropRect, transparentBackground: boolean) {
-    const image = await loadImage(dataUrl);
-    const sx = clamp(Math.round(rect.x * image.width), 0, image.width - 1);
-    const sy = clamp(Math.round(rect.y * image.height), 0, image.height - 1);
-    const width = clamp(Math.round(rect.width * image.width), 1, image.width - sx);
-    const height = clamp(Math.round(rect.height * image.height), 1, image.height - sy);
-    const canvas = document.createElement("canvas");
-    canvas.width = width;
-    canvas.height = height;
-    const context = canvas.getContext("2d");
-    if (!context) return dataUrl;
-    if (!transparentBackground) {
-        context.fillStyle = "#ffffff";
-        context.fillRect(0, 0, width, height);
-    }
-    context.drawImage(image, sx, sy, width, height, 0, 0, width, height);
-    return canvas.toDataURL("image/png");
-}
-
-export async function cutoutMaskDataUrl(dataUrl: string, maskDataUrl: string, transparentBackground: boolean) {
-    const [image, mask] = await Promise.all([loadImage(dataUrl), loadImage(maskDataUrl)]);
-    const canvas = document.createElement("canvas");
-    canvas.width = image.width;
-    canvas.height = image.height;
-    const context = canvas.getContext("2d");
-    if (!context) return null;
-    context.drawImage(image, 0, 0, canvas.width, canvas.height);
-    context.globalCompositeOperation = "destination-in";
-    context.drawImage(mask, 0, 0, canvas.width, canvas.height);
-    context.globalCompositeOperation = "source-over";
-    const trimmed = trimTransparent(canvas);
-    if (!trimmed) return null;
-    if (transparentBackground) return trimmed.toDataURL("image/png");
-    const output = document.createElement("canvas");
-    output.width = trimmed.width;
-    output.height = trimmed.height;
-    const outputContext = output.getContext("2d");
-    if (!outputContext) return trimmed.toDataURL("image/png");
-    outputContext.fillStyle = "#ffffff";
-    outputContext.fillRect(0, 0, output.width, output.height);
-    outputContext.drawImage(trimmed, 0, 0);
-    return output.toDataURL("image/png");
-}
-
-const CUTOUT_MARKER_COLOR = "#ff00ff";
-
-export async function buildCutoutAiReferenceDataUrl(dataUrl: string, region: { rect?: ImageCropRect; maskDataUrl?: string }) {
-    const image = await loadImage(dataUrl);
-    const canvas = document.createElement("canvas");
-    canvas.width = image.width;
-    canvas.height = image.height;
-    const context = canvas.getContext("2d");
-    if (!context) return dataUrl;
-    context.drawImage(image, 0, 0);
-    const overlay = document.createElement("canvas");
-    overlay.width = canvas.width;
-    overlay.height = canvas.height;
-    const overlayContext = overlay.getContext("2d");
-    if (!overlayContext) return dataUrl;
-    // Keep the selection, mark everything else as the magenta placeholder the model must erase.
-    overlayContext.fillStyle = CUTOUT_MARKER_COLOR;
-    overlayContext.fillRect(0, 0, overlay.width, overlay.height);
-    overlayContext.globalCompositeOperation = "destination-out";
-    if (region.maskDataUrl) {
-        const mask = await loadImage(region.maskDataUrl);
-        overlayContext.drawImage(mask, 0, 0, overlay.width, overlay.height);
-    } else if (region.rect) {
-        overlayContext.fillStyle = "#000000";
-        overlayContext.fillRect(Math.round(region.rect.x * overlay.width), Math.round(region.rect.y * overlay.height), Math.round(region.rect.width * overlay.width), Math.round(region.rect.height * overlay.height));
-    }
-    overlayContext.globalCompositeOperation = "source-over";
-    context.drawImage(overlay, 0, 0);
-    return canvas.toDataURL("image/png");
-}
-
 export async function trimTransparentDataUrl(dataUrl: string) {
     const image = await loadImage(dataUrl);
     const trimmed = trimTransparent(image);
     return trimmed ? trimmed.toDataURL("image/png") : null;
-}
-
-export async function flattenImageDataUrl(dataUrl: string, color = "#ffffff") {
-    const image = await loadImage(dataUrl);
-    const canvas = document.createElement("canvas");
-    canvas.width = image.width;
-    canvas.height = image.height;
-    const context = canvas.getContext("2d");
-    if (!context) return dataUrl;
-    context.fillStyle = color;
-    context.fillRect(0, 0, canvas.width, canvas.height);
-    context.drawImage(image, 0, 0);
-    return canvas.toDataURL("image/png");
 }
 
 export async function splitDataUrl(dataUrl: string, params: ImageSplitParams): Promise<ImageSplitPiece[]> {
@@ -271,14 +183,10 @@ function drawResizeCanvas(source: CanvasImageSource, sourceWidth: number, source
     return canvas;
 }
 
-function loadImage(dataUrl: string) {
+export function loadImage(dataUrl: string) {
     return new Promise<HTMLImageElement>((resolve) => {
         const image = new Image();
         image.onload = () => resolve(image);
         image.src = dataUrl;
     });
-}
-
-function clamp(value: number, min: number, max: number) {
-    return Math.min(max, Math.max(min, value));
 }

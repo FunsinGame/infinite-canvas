@@ -1,6 +1,6 @@
 import { saveAs } from "file-saver";
 
-import { imageSizePresets, inferMediaRatio } from "@/lib/media-size";
+import { imageSizePresets } from "@/lib/media-size";
 import { createZip } from "@/lib/zip";
 import type { UploadedImage } from "@/services/image-storage";
 
@@ -95,10 +95,9 @@ export function fitAiSize(width: number, height: number) {
     return { width: Math.max(1, Math.round(width * scale)), height: Math.max(1, Math.round(height * scale)) };
 }
 
-/** Request the preset of the selected 1K/2K tier that matches the element aspect ratio. */
-export function getElementRequestSize(width: number, height: number, resolution: DecomposeResolution) {
-    const ratio = inferMediaRatio(`${Math.max(1, Math.round(width))}x${Math.max(1, Math.round(height))}`);
-    return imageSizePresets[resolution][ratio];
+/** Always request a square canvas: the element keeps its own aspect inside it and the transparent margins are trimmed away afterwards. */
+export function getElementRequestSize(resolution: DecomposeResolution) {
+    return imageSizePresets[resolution]["1:1"];
 }
 
 export function drawToSize(source: CanvasImageSource, width: number, height: number) {
@@ -107,11 +106,8 @@ export function drawToSize(source: CanvasImageSource, width: number, height: num
     return canvas;
 }
 
-/** Crop the transparent margins some models add when the requested aspect differs from the element. */
-export function trimTransparent(source: HTMLImageElement | HTMLCanvasElement, alphaThreshold = 8) {
-    const width = source instanceof HTMLCanvasElement ? source.width : source.naturalWidth;
-    const height = source instanceof HTMLCanvasElement ? source.height : source.naturalHeight;
-    const canvas = drawToSize(source, width, height);
+function cropToContent(canvas: HTMLCanvasElement, alphaThreshold: number) {
+    const { width, height } = canvas;
     const data = canvas.getContext("2d")!.getImageData(0, 0, width, height).data;
     let left = width;
     let top = height;
@@ -131,6 +127,123 @@ export function trimTransparent(source: HTMLImageElement | HTMLCanvasElement, al
     const trimmed = createCanvas(right - left + 1, bottom - top + 1);
     trimmed.getContext("2d")!.drawImage(canvas, left, top, trimmed.width, trimmed.height, 0, 0, trimmed.width, trimmed.height);
     return trimmed;
+}
+
+/** Crop the transparent margins some models add when the requested aspect differs from the element. */
+export function trimTransparent(source: HTMLImageElement | HTMLCanvasElement, alphaThreshold = 8) {
+    const width = source instanceof HTMLCanvasElement ? source.width : source.naturalWidth;
+    const height = source instanceof HTMLCanvasElement ? source.height : source.naturalHeight;
+    return cropToContent(drawToSize(source, width, height), alphaThreshold);
+}
+
+function hasTransparentPixel(data: Uint8ClampedArray, alphaThreshold: number) {
+    for (let index = 3; index < data.length; index += 4) if (data[index] <= alphaThreshold) return true;
+    return false;
+}
+
+/** Models that ignore `background: transparent` paint the element on a backdrop; sample the canvas borders to see if it is one flat color. */
+function readBorderColor(data: Uint8ClampedArray, width: number, height: number, alphaThreshold: number) {
+    const samples: Array<[number, number, number]> = [];
+    const push = (x: number, y: number) => {
+        const offset = (y * width + x) * 4;
+        if (data[offset + 3] <= alphaThreshold) return;
+        samples.push([data[offset], data[offset + 1], data[offset + 2]]);
+    };
+    for (let x = 0; x < width; x += 1) {
+        push(x, 0);
+        push(x, height - 1);
+    }
+    for (let y = 0; y < height; y += 1) {
+        push(0, y);
+        push(width - 1, y);
+    }
+    if (!samples.length) return null;
+    const median = (index: 0 | 1 | 2) => {
+        const values = samples.map((sample) => sample[index]).sort((a, b) => a - b);
+        return values[Math.floor(values.length / 2)];
+    };
+    const color: [number, number, number] = [median(0), median(1), median(2)];
+    const deviations = samples.map((sample) => Math.max(Math.abs(sample[0] - color[0]), Math.abs(sample[1] - color[1]), Math.abs(sample[2] - color[2]))).sort((a, b) => a - b);
+    return { color, spread: deviations[Math.floor(deviations.length * 0.9)] };
+}
+
+/** Only the border-connected region is keyed out, so dark artwork inside the element is never eaten. */
+function keyOutColor(data: Uint8ClampedArray, width: number, height: number, color: [number, number, number], tolerance: number) {
+    const visited = new Uint8Array(width * height);
+    const stack: number[] = [];
+    const enqueue = (x: number, y: number) => {
+        const index = y * width + x;
+        if (visited[index]) return;
+        const offset = index * 4;
+        if (data[offset + 3] <= 8) return;
+        if (Math.abs(data[offset] - color[0]) > tolerance) return;
+        if (Math.abs(data[offset + 1] - color[1]) > tolerance) return;
+        if (Math.abs(data[offset + 2] - color[2]) > tolerance) return;
+        visited[index] = 1;
+        stack.push(index);
+    };
+    for (let x = 0; x < width; x += 1) {
+        enqueue(x, 0);
+        enqueue(x, height - 1);
+    }
+    for (let y = 0; y < height; y += 1) {
+        enqueue(0, y);
+        enqueue(width - 1, y);
+    }
+    while (stack.length) {
+        const index = stack.pop()!;
+        data[index * 4 + 3] = 0;
+        const x = index % width;
+        const y = (index - x) / width;
+        if (x > 0) enqueue(x - 1, y);
+        if (x < width - 1) enqueue(x + 1, y);
+        if (y > 0) enqueue(x, y - 1);
+        if (y < height - 1) enqueue(x, y + 1);
+    }
+}
+
+/** Soften the hard key edge inward by one pixel: background pixels stay clear so no dark fringe is left around the layer. */
+function featherAlpha(data: Uint8ClampedArray, width: number, height: number) {
+    const alpha = new Uint8ClampedArray(width * height);
+    for (let index = 0; index < alpha.length; index += 1) alpha[index] = data[index * 4 + 3];
+    for (let y = 1; y < height - 1; y += 1) {
+        for (let x = 1; x < width - 1; x += 1) {
+            const index = y * width + x;
+            if (alpha[index] !== 255) continue;
+            let edge = false;
+            let sum = 0;
+            for (let dy = -1; dy <= 1; dy += 1) {
+                for (let dx = -1; dx <= 1; dx += 1) {
+                    const neighbor = alpha[index + dy * width + dx];
+                    if (neighbor !== 255) edge = true;
+                    sum += neighbor;
+                }
+            }
+            if (edge) data[index * 4 + 3] = Math.round(sum / 9);
+        }
+    }
+}
+
+/**
+ * Trim a generated layer that may come back either with alpha or painted on a flat backdrop
+ * (some models ignore `background: transparent` and return an opaque black/white canvas).
+ */
+export function trimByBackground(source: HTMLImageElement | HTMLCanvasElement, alphaThreshold = 8, colorTolerance = 16) {
+    const width = source instanceof HTMLCanvasElement ? source.width : source.naturalWidth;
+    const height = source instanceof HTMLCanvasElement ? source.height : source.naturalHeight;
+    const canvas = drawToSize(source, width, height);
+    const context = canvas.getContext("2d")!;
+    const image = context.getImageData(0, 0, width, height);
+    if (!hasTransparentPixel(image.data, alphaThreshold)) {
+        const border = readBorderColor(image.data, width, height, alphaThreshold);
+        // A scattered border means the element touches the edge or a scene sits behind it; keying would damage the artwork.
+        if (border && border.spread <= colorTolerance * 1.5) {
+            keyOutColor(image.data, width, height, border.color, Math.max(colorTolerance, border.spread + 8));
+            featherAlpha(image.data, width, height);
+            context.putImageData(image, 0, 0);
+        }
+    }
+    return cropToContent(canvas, alphaThreshold);
 }
 
 export function boxArea(box: ElementBox) {

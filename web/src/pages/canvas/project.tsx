@@ -2075,10 +2075,22 @@ function InfiniteCanvasPage() {
 
     const cutoutImageNode = useCallback(
         async (node: CanvasNodeData, payload: CanvasImageCutoutPayload) => {
-            if (!node.metadata?.content) return;
-            const cutout = await uploadImage(payload.dataUrl);
-            const size = fitNodeSize(cutout.width, cutout.height, node.width, node.height);
+            if (!node.metadata?.content || !payload.dataUrls.length) return;
+            const uploaded = await Promise.all(payload.dataUrls.map((dataUrl) => uploadImage(dataUrl)));
+            if (!uploaded.length) return;
+            const primary = uploaded[0];
+            const size = fitNodeSize(primary.width, primary.height, node.width, node.height);
             const childId = nanoid();
+            const images: CanvasNodeImage[] = uploaded.map((image) => ({
+                id: nanoid(),
+                status: NODE_STATUS_SUCCESS,
+                content: image.url,
+                storageKey: image.storageKey,
+                naturalWidth: image.width,
+                naturalHeight: image.height,
+                bytes: image.bytes,
+                mimeType: image.mimeType,
+            }));
             const child: CanvasNodeData = {
                 id: childId,
                 type: CanvasNodeType.Image,
@@ -2087,7 +2099,9 @@ function InfiniteCanvasPage() {
                 width: size.width,
                 height: size.height,
                 metadata: {
-                    ...imageMetadata(cutout),
+                    ...imageMetadata(primary),
+                    images,
+                    primaryImageId: images[0].id,
                     prompt: node.metadata?.prompt,
                 },
             };
@@ -2096,6 +2110,7 @@ function InfiniteCanvasPage() {
             setSelectedNodeIds(new Set([childId]));
             setSelectedConnectionId(null);
             setDialogNodeId(childId);
+            if (images.length > 1) setExpandedBatchNodeIds((current) => new Set([...current, childId]));
         },
         [t],
     );
