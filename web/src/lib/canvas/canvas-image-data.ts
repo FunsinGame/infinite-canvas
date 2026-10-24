@@ -23,6 +23,11 @@ export type ImageUpscaleParams = {
     algorithm: ImageUpscaleAlgorithm;
 };
 
+export type ImageResizeParams = {
+    width: number;
+    height: number;
+};
+
 export type ImageSplitParams = {
     rows: number;
     columns: number;
@@ -203,6 +208,11 @@ export async function transformAngleDataUrl(dataUrl: string, params: ImageAngleT
     }
 
     return canvas.toDataURL("image/png");
+}
+
+export async function resizeDataUrl(dataUrl: string, params: ImageResizeParams) {
+    const image = await loadImage(dataUrl);
+    return drawResize(image, image.width, image.height, Math.max(1, Math.round(params.width)), Math.max(1, Math.round(params.height)), "high");
 }
 
 export async function upscaleDataUrl(dataUrl: string, params: ImageUpscaleParams) {

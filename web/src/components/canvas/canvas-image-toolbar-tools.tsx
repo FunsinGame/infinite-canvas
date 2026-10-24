@@ -1,15 +1,16 @@
 import type { ReactNode } from "react";
-import { Brush, Camera, Copy, FileText, Grid2x2, LassoSelect, Lock, LockOpen, Maximize2, Scissors, Sparkles, Upload, ZoomIn } from "lucide-react";
+import { Brush, Camera, Copy, FileText, Grid2x2, LassoSelect, Lock, LockOpen, Maximize2, Scaling, Scissors, Sparkles, Upload, ZoomIn } from "lucide-react";
 
 import type { CanvasNodeData } from "@/types/canvas";
 import i18n from "@/i18n";
 
-export type ImageNodeActionToolId = "copyPrompt" | "reversePrompt" | "replace" | "resize" | "maskEdit" | "crop" | "cutout" | "split" | "upscale" | "superResolve" | "angle" | "view";
+export type ImageNodeActionToolId = "copyPrompt" | "reversePrompt" | "replace" | "resize" | "resolution" | "maskEdit" | "crop" | "cutout" | "split" | "upscale" | "superResolve" | "angle" | "view";
 export type ImageQuickToolId = "info" | "delete" | "saveAsset" | "download" | ImageNodeActionToolId;
 
 export type ImageToolHandlers = {
     onUpload: (node: CanvasNodeData) => void;
     onToggleFreeResize: (node: CanvasNodeData) => void;
+    onResolution: (node: CanvasNodeData) => void;
     onMaskEdit: (node: CanvasNodeData) => void;
     onCrop: (node: CanvasNodeData) => void;
     onCutout: (node: CanvasNodeData) => void;
@@ -36,7 +37,7 @@ export type ImageQuickToolsConfig = {
     ids: ImageQuickToolId[];
 };
 
-export const IMAGE_QUICK_TOOLS_STORAGE_KEY = "canvas-image-quick-tools-v8";
+export const IMAGE_QUICK_TOOLS_STORAGE_KEY = "canvas-image-quick-tools-v9";
 
 const defaultBaseToolIds: ImageQuickToolId[] = ["info", "delete", "saveAsset", "download"];
 
@@ -73,6 +74,14 @@ export const imageToolDefinitions: ImageToolDefinition[] = [
         icon: (node) => (node.metadata?.freeResize ? <LockOpen className="size-4" /> : <Lock className="size-4" />),
         active: (node) => Boolean(node.metadata?.freeResize),
         run: (node, handlers) => handlers.onToggleFreeResize(node),
+    },
+    {
+        id: "resolution",
+        defaultVisible: true,
+        label: () => i18n.t("canvas.imageTools.resolution"),
+        title: () => i18n.t("canvas.imageTools.resolutionTitle"),
+        icon: () => <Scaling className="size-4" />,
+        run: (node, handlers) => handlers.onResolution(node),
     },
     {
         id: "maskEdit",

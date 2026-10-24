@@ -17,7 +17,7 @@ import { imageReferenceLabel } from "@/lib/image-reference-prompt";
 import { canvasThemes, type CanvasBackgroundMode } from "@/lib/canvas-theme";
 import { useAssetStore } from "@/stores/use-asset-store";
 import { useThemeStore } from "@/stores/use-theme-store";
-import { cropDataUrl, splitDataUrl, upscaleDataUrl } from "@/lib/canvas/canvas-image-data";
+import { cropDataUrl, resizeDataUrl, splitDataUrl, upscaleDataUrl } from "@/lib/canvas/canvas-image-data";
 import { buildDecomposeExport, downloadLayerZip, type DecomposeExportPayload, type LayerExportEntry } from "@/lib/canvas/canvas-decompose";
 import { fitNodeSize, nodeSizeFromRatio } from "@/lib/canvas/canvas-node-size";
 import { captureVideoFrame, type VideoFramePosition } from "@/lib/canvas/canvas-video-frame";
@@ -32,6 +32,7 @@ import { CanvasNodeCropDialog, type CanvasImageCropRect } from "@/components/can
 import { CanvasNodeCutoutDialog, type CanvasImageCutoutPayload } from "@/components/canvas/canvas-node-cutout-dialog";
 import { CanvasImageDecomposeDialog } from "@/components/canvas/canvas-image-decompose-dialog";
 import { CanvasNodeMaskEditDialog, type CanvasImageMaskEditPayload } from "@/components/canvas/canvas-node-mask-edit-dialog";
+import { CanvasNodeResolutionDialog, type CanvasImageResolution } from "@/components/canvas/canvas-node-resolution-dialog";
 import { CanvasNodeSplitDialog, type CanvasImageSplitParams } from "@/components/canvas/canvas-node-split-dialog";
 import { CanvasNodeUpscaleDialog, type CanvasImageUpscaleParams } from "@/components/canvas/canvas-node-upscale-dialog";
 import { buildNodeGenerationContext, buildNodeGenerationInputs, buildNodeResponseMessages, hydrateNodeGenerationContext, type NodeGenerationInput } from "@/components/canvas/canvas-node-generation";
@@ -264,6 +265,7 @@ function InfiniteCanvasPage() {
     const [splitNodeId, setSplitNodeId] = useState<string | null>(null);
     const [decomposeNodeId, setDecomposeNodeId] = useState<string | null>(null);
     const [upscaleNodeId, setUpscaleNodeId] = useState<string | null>(null);
+    const [resolutionNodeId, setResolutionNodeId] = useState<string | null>(null);
     const [superResolveNodeId, setSuperResolveNodeId] = useState<string | null>(null);
     const [angleNodeId, setAngleNodeId] = useState<string | null>(null);
     const [previewNodeId, setPreviewNodeId] = useState<string | null>(null);
@@ -741,6 +743,7 @@ function InfiniteCanvasPage() {
     const splitNode = splitNodeId ? nodeById.get(splitNodeId) || null : null;
     const decomposeNode = decomposeNodeId ? nodeById.get(decomposeNodeId) || null : null;
     const upscaleNode = upscaleNodeId ? nodeById.get(upscaleNodeId) || null : null;
+    const resolutionNode = resolutionNodeId ? nodeById.get(resolutionNodeId) || null : null;
     const superResolveNode = superResolveNodeId ? nodeById.get(superResolveNodeId) || null : null;
     const angleNode = angleNodeId ? nodeById.get(angleNodeId) || null : null;
     const contextMenuNode = contextMenu?.type === "node" ? nodeById.get(contextMenu.nodeId) || null : null;
@@ -2237,6 +2240,34 @@ function InfiniteCanvasPage() {
         setDialogNodeId(childId);
     }, []);
 
+    const resizeImageNode = useCallback(
+        async (node: CanvasNodeData, size: CanvasImageResolution) => {
+            if (!node.metadata?.content) return;
+            setResolutionNodeId(null);
+            const resized = await resizeDataUrl(node.metadata.content, size);
+            const image = await uploadImage(resized);
+            const nodeSize = fitNodeSize(image.width, image.height);
+            const childId = nanoid();
+            const child: CanvasNodeData = {
+                id: childId,
+                type: CanvasNodeType.Image,
+                title: t("canvas.projectPage.resizedImage", { width: image.width, height: image.height }),
+                position: { x: node.position.x + node.width + 96, y: node.position.y },
+                width: nodeSize.width,
+                height: nodeSize.height,
+                metadata: {
+                    ...imageMetadata(image),
+                    prompt: node.metadata?.prompt,
+                },
+            };
+            setNodes((prev) => [...prev, child]);
+            setConnections((prev) => [...prev, { id: nanoid(), fromNodeId: node.id, toNodeId: childId }]);
+            setSelectedNodeIds(new Set([childId]));
+            setDialogNodeId(childId);
+        },
+        [t],
+    );
+
     const generateAngleNode = useCallback(
         async (node: CanvasNodeData, params: CanvasImageAngleParams) => {
             if (!node.metadata?.content) return;
@@ -3503,6 +3534,7 @@ function InfiniteCanvasPage() {
                     onRetry={(node) => void handleRetryNode(node)}
                     onDecompose={(node) => setDecomposeNodeId(node.id)}
                     onToggleFreeResize={(node) => toggleNodeFreeResize(node.id)}
+                    onResolution={(node) => setResolutionNodeId(node.id)}
                     onDelete={(node) => deleteNodes(new Set([node.id]))}
                     onUngroup={(node) => ungroupSelection(new Set([node.id]))}
                 />
@@ -3603,6 +3635,10 @@ function InfiniteCanvasPage() {
 
                 {upscaleNode?.metadata?.content ? (
                     <CanvasNodeUpscaleDialog dataUrl={upscaleNode.metadata.content} open={Boolean(upscaleNode)} onClose={() => setUpscaleNodeId(null)} onConfirm={(params) => void upscaleImageNode(upscaleNode!, params)} />
+                ) : null}
+
+                {resolutionNode?.metadata?.content ? (
+                    <CanvasNodeResolutionDialog dataUrl={resolutionNode.metadata.content} open={Boolean(resolutionNode)} onClose={() => setResolutionNodeId(null)} onConfirm={(size) => void resizeImageNode(resolutionNode!, size)} />
                 ) : null}
 
                 <Modal title={t("canvas.projectPage.superResolve")} open={Boolean(superResolveNode?.metadata?.content)} centered footer={null} onCancel={() => setSuperResolveNodeId(null)}>
