@@ -4,7 +4,7 @@ import { useTranslation } from "react-i18next";
 
 import type { DecomposeElement, ElementBox } from "@/lib/canvas/canvas-decompose";
 
-type DragMode = "move" | "nw" | "ne" | "sw" | "se";
+type DragMode = "move" | "n" | "e" | "s" | "w" | "nw" | "ne" | "sw" | "se";
 
 type DragState = {
     id: string;
@@ -270,12 +270,20 @@ export function CanvasDecomposeBoxEditor({ imageUrl, width, height, elements, se
                             </span>
                             {selected ? (
                                 <span
-                                    className="pointer-events-auto absolute left-1/2 top-1 z-10 flex size-4 -translate-x-1/2 cursor-move items-center justify-center rounded-full border border-white bg-sky-500 text-white shadow"
+                                    className="pointer-events-auto absolute left-1/2 top-4 z-10 flex size-4 -translate-x-1/2 cursor-move items-center justify-center rounded-full border border-white bg-sky-500 text-white shadow"
                                     title={t("decompose.moveBox")}
                                     onPointerDown={(event) => beginDrag(event, element, "move")}
                                 >
                                     <Move className="size-2.5" />
                                 </span>
+                            ) : null}
+                            {selected ? (
+                                <>
+                                    <span className="pointer-events-auto absolute left-1/2 top-0 h-2 w-5 -translate-x-1/2 -translate-y-1/2 cursor-ns-resize rounded-full border border-white bg-sky-500" onPointerDown={(event) => beginDrag(event, element, "n")} />
+                                    <span className="pointer-events-auto absolute bottom-0 left-1/2 h-2 w-5 -translate-x-1/2 translate-y-1/2 cursor-ns-resize rounded-full border border-white bg-sky-500" onPointerDown={(event) => beginDrag(event, element, "s")} />
+                                    <span className="pointer-events-auto absolute left-0 top-1/2 h-5 w-2 -translate-x-1/2 -translate-y-1/2 cursor-ew-resize rounded-full border border-white bg-sky-500" onPointerDown={(event) => beginDrag(event, element, "w")} />
+                                    <span className="pointer-events-auto absolute right-0 top-1/2 h-5 w-2 translate-x-1/2 -translate-y-1/2 cursor-ew-resize rounded-full border border-white bg-sky-500" onPointerDown={(event) => beginDrag(event, element, "e")} />
+                                </>
                             ) : null}
                             <span className={`pointer-events-auto absolute -left-1 -top-1 size-2.5 cursor-nwse-resize rounded-full border border-white ${selected ? "bg-sky-500" : "bg-stone-400/80"}`} onPointerDown={(event) => beginDrag(event, element, "nw")} />
                             <span className={`pointer-events-auto absolute -right-1 -top-1 size-2.5 cursor-nesw-resize rounded-full border border-white ${selected ? "bg-sky-500" : "bg-stone-400/80"}`} onPointerDown={(event) => beginDrag(event, element, "ne")} />
@@ -330,18 +338,18 @@ function computeDragBox(drag: DragState, point: { x: number; y: number }, width:
         x = clamp(start.x + dx, 0, width - start.width);
         y = clamp(start.y + dy, 0, height - start.height);
     } else {
-        if (drag.mode === "nw" || drag.mode === "sw") {
+        if (drag.mode === "nw" || drag.mode === "sw" || drag.mode === "w") {
             const right = start.x + start.width;
             x = clamp(start.x + dx, 0, right - minSize);
             w = right - x;
-        } else {
+        } else if (drag.mode === "ne" || drag.mode === "se" || drag.mode === "e") {
             w = clamp(start.width + dx, minSize, width - start.x);
         }
-        if (drag.mode === "nw" || drag.mode === "ne") {
+        if (drag.mode === "nw" || drag.mode === "ne" || drag.mode === "n") {
             const bottom = start.y + start.height;
             y = clamp(start.y + dy, 0, bottom - minSize);
             h = bottom - y;
-        } else {
+        } else if (drag.mode === "sw" || drag.mode === "se" || drag.mode === "s") {
             h = clamp(start.height + dy, minSize, height - start.y);
         }
     }

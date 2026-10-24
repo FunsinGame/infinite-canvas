@@ -39,7 +39,7 @@ export default {
         deleteElement: "Delete element",
         noSelection: "Select an element on the left or a box on the image to edit it.",
         emptyElements: "No elements yet. Detect the image, or drag a box on the image.",
-        boxHint: "Drag on empty image space to create a box; drag a box to move it, drag its corners to resize; wheel to zoom, middle-drag to pan.",
+        boxHint: "Drag on empty image space to create a box; drag a box to move it, drag its corners to resize, drag an edge handle to move one side; wheel to zoom, middle-drag to pan.",
         hierarchyHint: "Deeper elements are split first. Image elements call the image model to produce transparent layers; text elements are rendered as labels; mask elements are not split and only mask their parent. Drag a row to change its parent.",
         dropRoot: "Drop here to move to the top level",
         dragHint: "Drag to change hierarchy",
