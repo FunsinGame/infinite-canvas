@@ -1,66 +1,114 @@
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { createPortal } from "react-dom";
-import { Button, Modal, Slider, Switch, Tooltip } from "antd";
-import { Brush, Check, RotateCcw, SquareDashed, ZoomIn, ZoomOut } from "lucide-react";
+import { Button, Modal, Select, Slider, Switch, Tooltip } from "antd";
+import { Brush, Check, LoaderCircle, Move, RotateCcw, ScrollText, SquareDashed, ZoomIn, ZoomOut } from "lucide-react";
+import { nanoid } from "nanoid";
 import { useTranslation } from "react-i18next";
 
+import { CanvasDecomposeRequestLog, type DecomposeRequestLog } from "@/components/canvas/canvas-decompose-request-log";
 import { useImageEditorViewport } from "@/components/canvas/use-image-editor-viewport";
 import { canvasThemes } from "@/lib/canvas-theme";
-import { cutoutMaskDataUrl, cutoutRectDataUrl, type ImageCropRect } from "@/lib/canvas/canvas-image-data";
+import { buildCutoutAiReferenceDataUrl, cutoutMaskDataUrl, cutoutRectDataUrl, flattenImageDataUrl, trimTransparentDataUrl, type ImageCropRect } from "@/lib/canvas/canvas-image-data";
 import { readImageMeta } from "@/lib/image-utils";
+import { requestEdit } from "@/services/api/image";
+import { imageToDataUrl } from "@/services/image-storage";
+import { modelOptionLabel, resolveModelForCapability, selectableModelsByCapability, useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 
 export type CanvasImageCutoutPayload = {
     dataUrl: string;
-    aiRepair: boolean;
-    transparentBackground: boolean;
 };
 
 type CutoutMode = "rect" | "brush";
 type Point = { x: number; y: number };
 type Stroke = { size: number; points: Point[] };
 type BrushPreview = { x: number; y: number; size: number };
+type RectDragMode = "move" | "n" | "e" | "s" | "w" | "nw" | "ne" | "sw" | "se";
 
 const defaultBrushRatio = 0.08;
-const minRectSize = 0.01;
 const maskColor = "#2563eb";
 
 export function CanvasNodeCutoutDialog({ dataUrl, open, onClose, onConfirm }: { dataUrl: string; open: boolean; onClose: () => void; onConfirm: (payload: CanvasImageCutoutPayload) => void }) {
     const { t } = useTranslation();
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
+    const effectiveConfig = useEffectiveConfig();
+    const isAiConfigReady = useConfigStore((state) => state.isAiConfigReady);
+    const openConfigDialog = useConfigStore((state) => state.openConfigDialog);
+    const imageModelOptions = selectableModelsByCapability(effectiveConfig, "image");
+    const preferredImageModel = resolveModelForCapability(effectiveConfig, undefined, "image");
     const maskCanvasRef = useRef<HTMLCanvasElement>(null);
     const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
+    const interactionRef = useRef<HTMLDivElement>(null);
     const drawingRef = useRef<Stroke | null>(null);
     const rectStartRef = useRef<Point | null>(null);
+    const dragAbortRef = useRef<AbortController | null>(null);
+    const requestAbortRef = useRef<AbortController | null>(null);
+    const closedRef = useRef(false);
     const [image, setImage] = useState<{ width: number; height: number } | null>(null);
     const [mode, setMode] = useState<CutoutMode>("rect");
     const [rect, setRect] = useState<ImageCropRect | null>(null);
+    const [creating, setCreating] = useState(false);
     const [hasBrush, setHasBrush] = useState(false);
     const [brushSize, setBrushSize] = useState(80);
     const [aiRepair, setAiRepair] = useState(true);
     const [transparentBackground, setTransparentBackground] = useState(true);
     const [brushPreview, setBrushPreview] = useState<BrushPreview | null>(null);
+    const [selectedImageModel, setSelectedImageModel] = useState("");
+    const [logs, setLogs] = useState<DecomposeRequestLog[]>([]);
+    const [logsOpen, setLogsOpen] = useState(false);
+    const [processing, setProcessing] = useState(false);
+    const [completed, setCompleted] = useState<string | null>(null);
+    const [completedFailed, setCompletedFailed] = useState(false);
     const [error, setError] = useState("");
     const [busy, setBusy] = useState(false);
     const viewport = useImageEditorViewport(image, open);
     const maxBrushSize = image ? Math.max(40, Math.round(Math.min(image.width, image.height) * 0.5)) : 200;
     const rectSize = image && rect ? `${Math.max(1, Math.round(rect.width * image.width))} × ${Math.max(1, Math.round(rect.height * image.height))}` : "";
+    const imageModel =
+        (selectedImageModel && imageModelOptions.includes(selectedImageModel) ? selectedImageModel : "") ||
+        (imageModelOptions.includes(preferredImageModel) && isAiConfigReady(effectiveConfig, preferredImageModel) ? preferredImageModel : "") ||
+        imageModelOptions.find((model) => isAiConfigReady(effectiveConfig, model)) ||
+        (imageModelOptions.includes(preferredImageModel) ? preferredImageModel : imageModelOptions[0]) ||
+        "";
+    const imageReady = Boolean(imageModel) && isAiConfigReady(effectiveConfig, imageModel);
+    // The selection lives in the zoomed media layer, so counter-scale its chrome to keep a constant screen size.
+    const overlayScale = 1 / viewport.zoom;
+    const locked = processing || Boolean(completed);
 
     useEffect(() => {
         if (!open) return;
         setImage(null);
         setMode("rect");
         setRect(null);
+        setCreating(false);
         setHasBrush(false);
         setAiRepair(true);
         setTransparentBackground(true);
+        setSelectedImageModel("");
+        setLogs([]);
+        setLogsOpen(false);
+        setProcessing(false);
+        setCompleted(null);
+        setCompletedFailed(false);
         setBrushPreview(null);
         setError("");
         setBusy(false);
         drawingRef.current = null;
         rectStartRef.current = null;
+        dragAbortRef.current?.abort();
+        requestAbortRef.current?.abort();
         void readImageMeta(dataUrl).then(setImage);
     }, [dataUrl, open]);
+
+    useEffect(() => {
+        if (!open) return;
+        closedRef.current = false;
+        return () => {
+            closedRef.current = true;
+            dragAbortRef.current?.abort();
+            requestAbortRef.current?.abort();
+        };
+    }, [open]);
 
     useEffect(() => {
         clearCanvas(maskCanvasRef.current);
@@ -74,12 +122,37 @@ export function CanvasNodeCutoutDialog({ dataUrl, open, onClose, onConfirm }: { 
         setBrushPreview({ x: event.clientX, y: event.clientY, size: brushSize });
     };
 
-    const readPoint = (event: ReactPointerEvent<HTMLDivElement>): Point => {
-        const box = event.currentTarget.getBoundingClientRect();
+    const readClientPoint = (clientX: number, clientY: number): Point => {
+        const box = interactionRef.current?.getBoundingClientRect();
+        if (!box) return { x: 0, y: 0 };
         return {
-            x: clamp((event.clientX - box.left) / Math.max(1, box.width), 0, 1),
-            y: clamp((event.clientY - box.top) / Math.max(1, box.height), 0, 1),
+            x: clamp((clientX - box.left) / Math.max(1, box.width), 0, 1),
+            y: clamp((clientY - box.top) / Math.max(1, box.height), 0, 1),
         };
+    };
+
+    const startRectDrag = (dragMode: RectDragMode, event: ReactPointerEvent) => {
+        if (!rect || !image || event.button !== 0 || viewport.spacePressed) return;
+        event.preventDefault();
+        event.stopPropagation();
+        dragAbortRef.current?.abort();
+        const controller = new AbortController();
+        dragAbortRef.current = controller;
+        const start = readClientPoint(event.clientX, event.clientY);
+        const startRect = { ...rect };
+        const pointerId = event.pointerId;
+        const move = (moveEvent: PointerEvent) => {
+            if (moveEvent.pointerId !== pointerId) return;
+            setRect(computeRectDrag(startRect, dragMode, start, readClientPoint(moveEvent.clientX, moveEvent.clientY), image));
+        };
+        const stop = (upEvent: PointerEvent) => {
+            if (upEvent.pointerId !== pointerId) return;
+            controller.abort();
+            if (dragAbortRef.current === controller) dragAbortRef.current = null;
+        };
+        document.addEventListener("pointermove", move, { signal: controller.signal });
+        document.addEventListener("pointerup", stop, { signal: controller.signal });
+        document.addEventListener("pointercancel", stop, { signal: controller.signal });
     };
 
     const drawStroke = (from: Point, to: Point, size: number) => {
@@ -111,10 +184,11 @@ export function CanvasNodeCutoutDialog({ dataUrl, open, onClose, onConfirm }: { 
         if (!image || event.button !== 0 || viewport.spacePressed) return;
         event.preventDefault();
         event.currentTarget.setPointerCapture(event.pointerId);
-        const point = readPoint(event);
+        const point = readClientPoint(event.clientX, event.clientY);
         if (mode === "rect") {
             rectStartRef.current = point;
             setRect({ x: point.x, y: point.y, width: 0, height: 0 });
+            setCreating(true);
             setError("");
             return;
         }
@@ -134,7 +208,7 @@ export function CanvasNodeCutoutDialog({ dataUrl, open, onClose, onConfirm }: { 
             const stroke = drawingRef.current;
             if (!stroke) return;
             event.preventDefault();
-            const imagePoint = toImagePoint(readPoint(event), image);
+            const imagePoint = toImagePoint(readClientPoint(event.clientX, event.clientY), image);
             const previous = stroke.points.at(-1) || imagePoint;
             drawStroke(previous, imagePoint, stroke.size);
             stroke.points.push(imagePoint);
@@ -143,7 +217,7 @@ export function CanvasNodeCutoutDialog({ dataUrl, open, onClose, onConfirm }: { 
         const start = rectStartRef.current;
         if (!start) return;
         event.preventDefault();
-        const current = readPoint(event);
+        const current = readClientPoint(event.clientX, event.clientY);
         setRect({
             x: Math.min(start.x, current.x),
             y: Math.min(start.y, current.y),
@@ -159,13 +233,16 @@ export function CanvasNodeCutoutDialog({ dataUrl, open, onClose, onConfirm }: { 
             return;
         }
         rectStartRef.current = null;
-        setRect((current) => (current && current.width >= minRectSize && current.height >= minRectSize ? current : null));
+        setCreating(false);
+        setRect((current) => (current && image && current.width * image.width >= 8 && current.height * image.height >= 8 ? current : null));
     };
 
     const resetSelection = () => {
         rectStartRef.current = null;
         drawingRef.current = null;
+        dragAbortRef.current?.abort();
         setRect(null);
+        setCreating(false);
         setHasBrush(false);
         setError("");
         clearCanvas(maskCanvasRef.current);
@@ -173,7 +250,7 @@ export function CanvasNodeCutoutDialog({ dataUrl, open, onClose, onConfirm }: { 
     };
 
     const submit = async () => {
-        if (!image || busy) return;
+        if (!image || busy || locked) return;
         if (mode === "rect" && !rect) {
             setError(t("canvas.editors.cutoutRectRequired"));
             return;
@@ -182,10 +259,14 @@ export function CanvasNodeCutoutDialog({ dataUrl, open, onClose, onConfirm }: { 
             setError(t("canvas.editors.cutoutBrushRequired"));
             return;
         }
+        if (aiRepair && !imageReady) {
+            setError(t("canvas.editors.cutoutModelRequired"));
+            return;
+        }
         setBusy(true);
         setError("");
         try {
-            const maskDataUrl = maskCanvasRef.current?.toDataURL("image/png");
+            const maskDataUrl = mode === "brush" ? maskCanvasRef.current?.toDataURL("image/png") : undefined;
             const cutout =
                 mode === "rect" && rect
                     ? await cutoutRectDataUrl(dataUrl, rect, transparentBackground)
@@ -193,7 +274,70 @@ export function CanvasNodeCutoutDialog({ dataUrl, open, onClose, onConfirm }: { 
                       ? await cutoutMaskDataUrl(dataUrl, maskDataUrl, transparentBackground)
                       : null;
             if (!cutout) throw new Error(t("canvas.editors.cutoutEmpty"));
-            onConfirm({ dataUrl: cutout, aiRepair, transparentBackground });
+            if (closedRef.current) return;
+            if (!aiRepair) {
+                onConfirm({ dataUrl: cutout });
+                onClose();
+                return;
+            }
+
+            const aiDataUrl = await buildCutoutAiReferenceDataUrl(dataUrl, mode === "rect" && rect ? { rect } : { maskDataUrl });
+            const localMeta = await readImageMeta(cutout);
+            if (closedRef.current) return;
+            const startedAt = Date.now();
+            const logId = nanoid();
+            const prompt = t("canvas.projectPage.cutoutRepairPrompt");
+            const requestConfig = { ...effectiveConfig, model: imageModel, count: "1", size: "auto", background: "transparent" };
+            setLogs((current) => [
+                ...current,
+                {
+                    id: logId,
+                    elementId: logId,
+                    elementName: t("canvas.editors.cutoutTitle"),
+                    box: {
+                        x: 0,
+                        y: 0,
+                        width: localMeta.width,
+                        height: localMeta.height,
+                    },
+                    model: modelOptionLabel(effectiveConfig, imageModel),
+                    size: "auto",
+                    quality: requestConfig.quality || "",
+                    background: "transparent",
+                    count: 1,
+                    prompt,
+                    systemPrompt: requestConfig.systemPrompt || "",
+                    input: aiDataUrl,
+                    status: "loading",
+                    createdAt: startedAt,
+                },
+            ]);
+            setProcessing(true);
+            const controller = new AbortController();
+            requestAbortRef.current = controller;
+            try {
+                const result = await requestEdit(requestConfig, prompt, [{ id: logId, name: "cutout.png", type: "image/png", dataUrl: aiDataUrl }], { signal: controller.signal }).then((items) => items[0]);
+                if (controller.signal.aborted || closedRef.current) return;
+                const rawOutput = await imageToDataUrl({ dataUrl: result.dataUrl }, { signal: controller.signal });
+                setLogs((current) => current.map((item) => (item.id === logId ? { ...item, status: "success", output: rawOutput, durationMs: Date.now() - startedAt } : item)));
+                const trimmedDataUrl = await trimTransparentDataUrl(rawOutput);
+                if (!trimmedDataUrl) throw new Error(t("canvas.editors.cutoutEmpty"));
+                const finalDataUrl = transparentBackground ? trimmedDataUrl : await flattenImageDataUrl(trimmedDataUrl);
+                if (closedRef.current) return;
+                onConfirm({ dataUrl: finalDataUrl });
+                setCompleted(finalDataUrl);
+                setCompletedFailed(false);
+            } catch (requestError) {
+                if (controller.signal.aborted || closedRef.current) return;
+                const errorMessage = requestError instanceof Error ? requestError.message : t("canvas.editors.cutoutAiFailed");
+                setLogs((current) => current.map((item) => (item.id === logId ? { ...item, status: "error", error: errorMessage, durationMs: Date.now() - startedAt } : item)));
+                onConfirm({ dataUrl: cutout });
+                setCompleted(cutout);
+                setCompletedFailed(true);
+            } finally {
+                if (requestAbortRef.current === controller) requestAbortRef.current = null;
+                setProcessing(false);
+            }
         } catch (submitError) {
             setError(submitError instanceof Error ? submitError.message : t("canvas.editors.cutoutEmpty"));
         } finally {
@@ -202,7 +346,7 @@ export function CanvasNodeCutoutDialog({ dataUrl, open, onClose, onConfirm }: { 
     };
 
     return (
-        <Modal title={null} open={open && Boolean(dataUrl)} onCancel={onClose} footer={null} width={1060} centered destroyOnHidden transitionName="" maskTransitionName="">
+        <Modal title={null} open={open && Boolean(dataUrl)} onCancel={onClose} footer={null} width={1060} centered destroyOnHidden transitionName="" maskTransitionName="" maskClosable={!processing} keyboard={!processing}>
             <div className="grid gap-5 lg:grid-cols-[minmax(400px,1fr)_320px]" data-canvas-no-zoom>
                 <div className="relative">
                     <div
@@ -223,9 +367,43 @@ export function CanvasNodeCutoutDialog({ dataUrl, open, onClose, onConfirm }: { 
                                             className="pointer-events-none absolute inset-0 size-full"
                                             style={{ opacity: mode === "brush" ? 0.42 : 0, transition: "opacity 120ms" }}
                                         />
-                                        <RectSelection rect={mode === "rect" ? rect : null} label={rectSize} />
+                                        {mode === "rect" && rect && rect.width > 0 && rect.height > 0 ? (
+                                            <div
+                                                className={`absolute z-20 touch-none border-sky-400 bg-sky-400/10 ${creating || locked ? "pointer-events-none" : "cursor-move"}`}
+                                                style={{ borderWidth: 2 / viewport.zoom, borderStyle: creating ? "dashed" : "solid", left: `${rect.x * 100}%`, top: `${rect.y * 100}%`, width: `${rect.width * 100}%`, height: `${rect.height * 100}%` }}
+                                                onPointerDown={creating ? undefined : (event) => startRectDrag("move", event)}
+                                            >
+                                                {creating || locked ? null : (
+                                                    <>
+                                                        <span
+                                                            className="pointer-events-none absolute left-0 max-w-full truncate bg-sky-500 text-white"
+                                                            style={{ bottom: "100%", fontSize: 10 * overlayScale, lineHeight: `${16 * overlayScale}px`, padding: `${2 * overlayScale}px ${6 * overlayScale}px` }}
+                                                        >
+                                                            {rectSize}
+                                                        </span>
+                                                        <span
+                                                            className="pointer-events-auto absolute left-1/2 z-10 flex -translate-x-1/2 cursor-move items-center justify-center rounded-full border border-white bg-sky-500 text-white shadow"
+                                                            style={{ top: 14 * overlayScale, width: 16 * overlayScale, height: 16 * overlayScale, borderWidth: overlayScale }}
+                                                            title={t("canvas.editors.cutoutMoveRect")}
+                                                            onPointerDown={(event) => startRectDrag("move", event)}
+                                                        >
+                                                            <Move style={{ width: 10 * overlayScale, height: 10 * overlayScale }} />
+                                                        </span>
+                                                        <span className="pointer-events-auto absolute left-1/2 top-0 -translate-x-1/2 -translate-y-1/2 cursor-ns-resize rounded-full border border-white bg-sky-500" style={{ width: 20 * overlayScale, height: 8 * overlayScale, borderWidth: overlayScale }} onPointerDown={(event) => startRectDrag("n", event)} />
+                                                        <span className="pointer-events-auto absolute left-1/2 bottom-0 -translate-x-1/2 translate-y-1/2 cursor-ns-resize rounded-full border border-white bg-sky-500" style={{ width: 20 * overlayScale, height: 8 * overlayScale, borderWidth: overlayScale }} onPointerDown={(event) => startRectDrag("s", event)} />
+                                                        <span className="pointer-events-auto absolute left-0 top-1/2 -translate-x-1/2 -translate-y-1/2 cursor-ew-resize rounded-full border border-white bg-sky-500" style={{ width: 8 * overlayScale, height: 20 * overlayScale, borderWidth: overlayScale }} onPointerDown={(event) => startRectDrag("w", event)} />
+                                                        <span className="pointer-events-auto absolute right-0 top-1/2 translate-x-1/2 -translate-y-1/2 cursor-ew-resize rounded-full border border-white bg-sky-500" style={{ width: 8 * overlayScale, height: 20 * overlayScale, borderWidth: overlayScale }} onPointerDown={(event) => startRectDrag("e", event)} />
+                                                        <span className="pointer-events-auto absolute left-0 top-0 -translate-x-1/2 -translate-y-1/2 cursor-nwse-resize rounded-full border border-white bg-sky-500" style={{ width: 10 * overlayScale, height: 10 * overlayScale, borderWidth: overlayScale }} onPointerDown={(event) => startRectDrag("nw", event)} />
+                                                        <span className="pointer-events-auto absolute left-full top-0 -translate-x-1/2 -translate-y-1/2 cursor-nesw-resize rounded-full border border-white bg-sky-500" style={{ width: 10 * overlayScale, height: 10 * overlayScale, borderWidth: overlayScale }} onPointerDown={(event) => startRectDrag("ne", event)} />
+                                                        <span className="pointer-events-auto absolute left-0 top-full -translate-x-1/2 -translate-y-1/2 cursor-nesw-resize rounded-full border border-white bg-sky-500" style={{ width: 10 * overlayScale, height: 10 * overlayScale, borderWidth: overlayScale }} onPointerDown={(event) => startRectDrag("sw", event)} />
+                                                        <span className="pointer-events-auto absolute left-full top-full -translate-x-1/2 -translate-y-1/2 cursor-nwse-resize rounded-full border border-white bg-sky-500" style={{ width: 10 * overlayScale, height: 10 * overlayScale, borderWidth: overlayScale }} onPointerDown={(event) => startRectDrag("se", event)} />
+                                                    </>
+                                                )}
+                                            </div>
+                                        ) : null}
                                         <div
-                                            className="absolute inset-0 touch-none"
+                                            ref={interactionRef}
+                                            className={`absolute inset-0 z-10 touch-none ${locked ? "pointer-events-none" : ""}`}
                                             style={{ cursor: mode === "brush" ? "none" : "crosshair" }}
                                             onPointerDown={startDraw}
                                             onPointerMove={moveDraw}
@@ -258,65 +436,124 @@ export function CanvasNodeCutoutDialog({ dataUrl, open, onClose, onConfirm }: { 
                     </div>
                 </div>
 
-                <div className="flex min-h-[360px] flex-col gap-4">
-                    <div>
-                        <h2 className="text-xl font-semibold">{t("canvas.editors.cutoutTitle")}</h2>
-                        <div className="mt-2 text-sm opacity-60">{image ? `${image.width} x ${image.height}px` : t("canvas.editors.loading")}</div>
-                        <div className="mt-2 text-xs leading-5 opacity-55">{t(mode === "rect" ? "canvas.editors.cutoutRectHint" : "canvas.editors.cutoutBrushHint")}</div>
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-2">
-                        <Button type={mode === "rect" ? "primary" : "default"} icon={<SquareDashed className="size-4" />} onClick={() => { setMode("rect"); setBrushPreview(null); setError(""); }} disabled={!image}>
-                            {t("canvas.editors.cutoutRect")}
-                        </Button>
-                        <Button type={mode === "brush" ? "primary" : "default"} icon={<Brush className="size-4" />} onClick={() => { setMode("brush"); setError(""); }} disabled={!image}>
-                            {t("canvas.editors.cutoutBrush")}
-                        </Button>
-                    </div>
-
-                    {mode === "brush" ? (
-                        <div className="space-y-2">
-                            <div className="flex items-center justify-between text-sm">
-                                <span className="font-medium opacity-75">{t("canvas.editors.brushSize")}</span>
-                                <span className="font-semibold">{brushSize}px</span>
-                            </div>
-                            <Slider min={8} max={maxBrushSize} step={2} value={brushSize} disabled={!image} onChange={(value) => setBrushSize(clampBrushSize(value, image))} />
+                {completed ? (
+                    <div className="flex min-h-[360px] flex-col gap-4">
+                        <div>
+                            <h2 className="text-xl font-semibold">{t("canvas.editors.cutoutDone")}</h2>
+                            <div className="mt-2 text-xs leading-5 opacity-55">{t("canvas.editors.cutoutDoneHint")}</div>
                         </div>
-                    ) : null}
-
-                    <div className="space-y-2">
-                        <label className="flex items-start justify-between gap-3 rounded-lg border border-black/10 px-3 py-2.5 dark:border-white/10">
-                            <span className="min-w-0">
-                                <span className="block text-sm font-medium">{t("canvas.editors.cutoutAiRepair")}</span>
-                                <span className="mt-0.5 block text-xs leading-5 opacity-55">{t("canvas.editors.cutoutAiRepairHint")}</span>
-                            </span>
-                            <Switch size="small" checked={aiRepair} onChange={setAiRepair} />
-                        </label>
-                        <label className="flex items-start justify-between gap-3 rounded-lg border border-black/10 px-3 py-2.5 dark:border-white/10">
-                            <span className="min-w-0">
-                                <span className="block text-sm font-medium">{t("canvas.editors.cutoutTransparent")}</span>
-                                <span className="mt-0.5 block text-xs leading-5 opacity-55">{t("canvas.editors.cutoutTransparentHint")}</span>
-                            </span>
-                            <Switch size="small" checked={transparentBackground} onChange={setTransparentBackground} />
-                        </label>
-                    </div>
-
-                    <div className="mt-auto space-y-3">
-                        <div className="text-xs leading-5 opacity-55">{t("canvas.editors.cropHint")}</div>
-                        {error ? <div className="text-xs font-medium text-[#ef4444]">{error}</div> : null}
-                        <div className="flex items-center justify-between gap-2">
-                            <Button icon={<RotateCcw className="size-4" />} onClick={resetSelection}>
-                                {t("canvas.editors.reset")}
+                        {completedFailed ? (
+                            <div className="rounded-lg border border-amber-300/60 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-700 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-300">
+                                {t("canvas.editors.cutoutAiFallback")}
+                            </div>
+                        ) : null}
+                        <div className="flex min-h-0 flex-1 items-center justify-center overflow-hidden rounded-lg border border-black/10 bg-black/5 p-2 dark:border-white/10">
+                            <img src={completed} alt="" className="max-h-[48vh] max-w-full object-contain" />
+                        </div>
+                        <div className="mt-auto flex items-center justify-between gap-2">
+                            <Button icon={<ScrollText className="size-4" />} disabled={!logs.length} onClick={() => setLogsOpen(true)}>
+                                {t("decompose.logs.button", { count: logs.length })}
                             </Button>
-                            <div className="flex items-center gap-2">
-                                <Button onClick={onClose}>{t("canvas.editors.cancel")}</Button>
-                                <Button type="primary" icon={<Check className="size-4" />} loading={busy} disabled={!image} onClick={() => void submit()}>
-                                    {t("canvas.editors.cutoutConfirm")}
+                            <Button type="primary" onClick={onClose}>
+                                {t("canvas.editors.cutoutDoneAction")}
+                            </Button>
+                        </div>
+                    </div>
+                ) : (
+                    <div className="flex min-h-[360px] flex-col gap-4">
+                        <div>
+                            <h2 className="text-xl font-semibold">{t("canvas.editors.cutoutTitle")}</h2>
+                            <div className="mt-2 text-sm opacity-60">{image ? `${image.width} x ${image.height}px` : t("canvas.editors.loading")}</div>
+                            <div className="mt-2 text-xs leading-5 opacity-55">{t(mode === "rect" ? "canvas.editors.cutoutRectHint" : "canvas.editors.cutoutBrushHint")}</div>
+                            {logs.length ? (
+                                <Button type="link" size="small" className="!mt-1 !h-auto !px-0" icon={<ScrollText className="size-3.5" />} onClick={() => setLogsOpen(true)}>
+                                    {t("decompose.logs.button", { count: logs.length })}
                                 </Button>
+                            ) : null}
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-2">
+                            <Button type={mode === "rect" ? "primary" : "default"} icon={<SquareDashed className="size-4" />} onClick={() => { dragAbortRef.current?.abort(); rectStartRef.current = null; setCreating(false); setMode("rect"); setBrushPreview(null); setError(""); }} disabled={!image || locked}>
+                                {t("canvas.editors.cutoutRect")}
+                            </Button>
+                            <Button type={mode === "brush" ? "primary" : "default"} icon={<Brush className="size-4" />} onClick={() => { dragAbortRef.current?.abort(); setCreating(false); setMode("brush"); setError(""); }} disabled={!image || locked}>
+                                {t("canvas.editors.cutoutBrush")}
+                            </Button>
+                        </div>
+
+                        {mode === "brush" ? (
+                            <div className="space-y-2">
+                                <div className="flex items-center justify-between text-sm">
+                                    <span className="font-medium opacity-75">{t("canvas.editors.brushSize")}</span>
+                                    <span className="font-semibold">{brushSize}px</span>
+                                </div>
+                                <Slider min={8} max={maxBrushSize} step={2} value={brushSize} disabled={!image || locked} onChange={(value) => setBrushSize(clampBrushSize(value, image))} />
+                            </div>
+                        ) : null}
+
+                        <div className="space-y-2">
+                            <label className="flex items-start justify-between gap-3 rounded-lg border border-black/10 px-3 py-2.5 dark:border-white/10">
+                                <span className="min-w-0">
+                                    <span className="block text-sm font-medium">{t("canvas.editors.cutoutAiRepair")}</span>
+                                    <span className="mt-0.5 block text-xs leading-5 opacity-55">{t("canvas.editors.cutoutAiRepairHint")}</span>
+                                </span>
+                                <Switch size="small" checked={aiRepair} onChange={setAiRepair} disabled={locked} />
+                            </label>
+                            {aiRepair ? (
+                                <div className="space-y-2 rounded-lg border border-black/10 px-3 py-2.5 dark:border-white/10">
+                                    <div className="text-sm font-medium">{t("canvas.editors.cutoutModel")}</div>
+                                    <Select
+                                        className="w-full"
+                                        value={imageModelOptions.includes(imageModel) ? imageModel : undefined}
+                                        options={imageModelOptions.map((model) => ({ value: model, label: modelOptionLabel(effectiveConfig, model) }))}
+                                        placeholder={t("canvas.editors.cutoutModelPlaceholder")}
+                                        disabled={locked}
+                                        onChange={setSelectedImageModel}
+                                    />
+                                    {imageReady ? null : (
+                                        <div className="flex items-center justify-between gap-2 text-xs text-amber-600 dark:text-amber-400">
+                                            <span>{t("canvas.editors.cutoutModelNotReady")}</span>
+                                            <Button type="link" size="small" className="!px-0" onClick={() => openConfigDialog(true)}>
+                                                {t("decompose.openConfig")}
+                                            </Button>
+                                        </div>
+                                    )}
+                                </div>
+                            ) : (
+                                <div className="rounded-lg border border-black/10 px-3 py-2 text-xs leading-5 opacity-55 dark:border-white/10">{t("canvas.editors.cutoutLocalHint")}</div>
+                            )}
+                            <label className="flex items-start justify-between gap-3 rounded-lg border border-black/10 px-3 py-2.5 dark:border-white/10">
+                                <span className="min-w-0">
+                                    <span className="block text-sm font-medium">{t("canvas.editors.cutoutTransparent")}</span>
+                                    <span className="mt-0.5 block text-xs leading-5 opacity-55">{t("canvas.editors.cutoutTransparentHint")}</span>
+                                </span>
+                                <Switch size="small" checked={transparentBackground} onChange={setTransparentBackground} disabled={locked} />
+                            </label>
+                        </div>
+
+                        <div className="mt-auto space-y-3">
+                            <div className="text-xs leading-5 opacity-55">{t("canvas.editors.cropHint")}</div>
+                            {processing ? (
+                                <div className="flex items-center gap-2 text-sm opacity-70">
+                                    <LoaderCircle className="size-4 animate-spin" />
+                                    {t("canvas.editors.cutoutProcessing")}
+                                </div>
+                            ) : null}
+                            {error ? <div className="text-xs font-medium text-[#ef4444]">{error}</div> : null}
+                            <div className="flex items-center justify-between gap-2">
+                                <Button icon={<RotateCcw className="size-4" />} onClick={resetSelection} disabled={locked}>
+                                    {t("canvas.editors.reset")}
+                                </Button>
+                                <div className="flex items-center gap-2">
+                                    <Button onClick={onClose}>{t("canvas.editors.cancel")}</Button>
+                                    <Button type="primary" icon={<Check className="size-4" />} loading={busy} disabled={!image || locked} onClick={() => void submit()}>
+                                        {t("canvas.editors.cutoutConfirm")}
+                                    </Button>
+                                </div>
                             </div>
                         </div>
                     </div>
-                </div>
+                )}
             </div>
 
             {brushPreview && mode === "brush"
@@ -328,23 +565,52 @@ export function CanvasNodeCutoutDialog({ dataUrl, open, onClose, onConfirm }: { 
                       document.body,
                   )
                 : null}
+
+            <CanvasDecomposeRequestLog
+                open={logsOpen}
+                logs={logs}
+                fileBase={t("canvas.editors.cutoutTitle")}
+                title={t("canvas.editors.cutoutLogTitle")}
+                emptyText={t("canvas.editors.cutoutLogEmpty")}
+                boxLabel={t("canvas.editors.cutoutLogSelection")}
+                onClose={() => setLogsOpen(false)}
+            />
         </Modal>
     );
 }
 
-function RectSelection({ rect, label }: { rect: ImageCropRect | null; label: string }) {
-    if (!rect) return null;
-    return (
-        <>
-            <div className="pointer-events-none absolute inset-x-0 top-0 bg-black/50" style={{ height: `${rect.y * 100}%` }} />
-            <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-black/50" style={{ height: `${(1 - rect.y - rect.height) * 100}%` }} />
-            <div className="pointer-events-none absolute bg-black/50" style={{ left: 0, top: `${rect.y * 100}%`, width: `${rect.x * 100}%`, height: `${rect.height * 100}%` }} />
-            <div className="pointer-events-none absolute bg-black/50" style={{ right: 0, top: `${rect.y * 100}%`, width: `${(1 - rect.x - rect.width) * 100}%`, height: `${rect.height * 100}%` }} />
-            <div className="pointer-events-none absolute border-2 border-white shadow-[0_0_0_1px_rgba(0,0,0,.3),0_0_24px_rgba(0,0,0,.24)]" style={{ left: `${rect.x * 100}%`, top: `${rect.y * 100}%`, width: `${rect.width * 100}%`, height: `${rect.height * 100}%` }}>
-                {rect.width > 0.06 && rect.height > 0.04 ? <span className="absolute left-1 top-1 rounded bg-black/65 px-1.5 py-0.5 text-[10px] font-medium text-white">{label}</span> : null}
-            </div>
-        </>
-    );
+function computeRectDrag(startRect: ImageCropRect, mode: RectDragMode, start: Point, current: Point, image: { width: number; height: number }): ImageCropRect {
+    const dx = current.x - start.x;
+    const dy = current.y - start.y;
+    const minWidth = 8 / image.width;
+    const minHeight = 8 / image.height;
+    if (mode === "move") {
+        return {
+            x: clamp(startRect.x + dx, 0, 1 - startRect.width),
+            y: clamp(startRect.y + dy, 0, 1 - startRect.height),
+            width: startRect.width,
+            height: startRect.height,
+        };
+    }
+    let x = startRect.x;
+    let y = startRect.y;
+    let width = startRect.width;
+    let height = startRect.height;
+    if (mode === "nw" || mode === "w" || mode === "sw") {
+        const right = startRect.x + startRect.width;
+        x = clamp(startRect.x + dx, 0, Math.max(0, right - minWidth));
+        width = right - x;
+    } else if (mode === "ne" || mode === "e" || mode === "se") {
+        width = clamp(startRect.width + dx, minWidth, 1 - startRect.x);
+    }
+    if (mode === "nw" || mode === "n" || mode === "ne") {
+        const bottom = startRect.y + startRect.height;
+        y = clamp(startRect.y + dy, 0, Math.max(0, bottom - minHeight));
+        height = bottom - y;
+    } else if (mode === "sw" || mode === "s" || mode === "se") {
+        height = clamp(startRect.height + dy, minHeight, 1 - startRect.y);
+    }
+    return { x, y, width, height };
 }
 
 function toImagePoint(point: Point, image: { width: number; height: number }): Point {

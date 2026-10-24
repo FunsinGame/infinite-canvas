@@ -31,9 +31,12 @@ type Props = {
     logs: DecomposeRequestLog[];
     fileBase: string;
     onClose: () => void;
+    title?: string;
+    emptyText?: string;
+    boxLabel?: string;
 };
 
-export function CanvasDecomposeRequestLog({ open, logs, fileBase, onClose }: Props) {
+export function CanvasDecomposeRequestLog({ open, logs, fileBase, onClose, title, emptyText, boxLabel }: Props) {
     const { t } = useTranslation();
     const { message } = App.useApp();
     const copyText = useCopyText();
@@ -77,9 +80,9 @@ export function CanvasDecomposeRequestLog({ open, logs, fileBase, onClose }: Pro
     };
 
     return (
-        <Modal open={open} title={t("decompose.logs.title")} onCancel={onClose} footer={null} width={1000}>
+        <Modal open={open} title={title || t("decompose.logs.title")} onCancel={onClose} footer={null} width={1000}>
             {!logs.length ? (
-                <div className="py-12 text-center text-sm text-stone-500">{t("decompose.logs.empty")}</div>
+                <div className="py-12 text-center text-sm text-stone-500">{emptyText || t("decompose.logs.empty")}</div>
             ) : (
                 <div className="space-y-3">
                     <div className="flex flex-wrap items-center justify-between gap-2">
@@ -95,7 +98,7 @@ export function CanvasDecomposeRequestLog({ open, logs, fileBase, onClose }: Pro
                     </div>
                     <div className="thin-scrollbar max-h-[72vh] space-y-3 overflow-y-auto pr-1">
                         {logs.map((log, index) => (
-                            <RequestCard key={log.id} log={log} index={index} />
+                            <RequestCard key={log.id} log={log} index={index} boxLabel={boxLabel} />
                         ))}
                     </div>
                 </div>
@@ -104,7 +107,7 @@ export function CanvasDecomposeRequestLog({ open, logs, fileBase, onClose }: Pro
     );
 }
 
-function RequestCard({ log, index }: { log: DecomposeRequestLog; index: number }) {
+function RequestCard({ log, index, boxLabel }: { log: DecomposeRequestLog; index: number; boxLabel?: string }) {
     const { t } = useTranslation();
     const copyText = useCopyText();
     const files = logFileNames(log, index);
@@ -150,7 +153,7 @@ function RequestCard({ log, index }: { log: DecomposeRequestLog; index: number }
                             {t("decompose.logs.quantity")}: {log.count}
                         </span>
                         <span>
-                            {t("decompose.logs.box")}: {Math.round(log.box.width)}×{Math.round(log.box.height)}
+                            {boxLabel || t("decompose.logs.box")}: {Math.round(log.box.width)}×{Math.round(log.box.height)}
                         </span>
                     </div>
                     {log.systemPrompt ? (

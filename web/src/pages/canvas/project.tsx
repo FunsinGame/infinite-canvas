@@ -9,7 +9,7 @@ import { requestEdit, requestGeneration, requestImageQuestion } from "@/services
 import { requestAudioGeneration, storeGeneratedAudio } from "@/services/api/audio";
 import { createVideoGenerationTask, isVideoTaskFailed, storeGeneratedVideo, waitForVideoGenerationTask } from "@/services/api/video";
 import { defaultConfig, useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
-import { ensureImagePreview, getImageBlob, imageToDataUrl, uploadImage } from "@/services/image-storage";
+import { ensureImagePreview, getImageBlob, uploadImage } from "@/services/image-storage";
 import { uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { nanoid } from "nanoid";
 import { getDataUrlByteSize, readImageMeta } from "@/lib/image-utils";
@@ -17,7 +17,7 @@ import { imageReferenceLabel } from "@/lib/image-reference-prompt";
 import { canvasThemes, type CanvasBackgroundMode } from "@/lib/canvas-theme";
 import { useAssetStore } from "@/stores/use-asset-store";
 import { useThemeStore } from "@/stores/use-theme-store";
-import { cropDataUrl, flattenImageDataUrl, splitDataUrl, upscaleDataUrl } from "@/lib/canvas/canvas-image-data";
+import { cropDataUrl, splitDataUrl, upscaleDataUrl } from "@/lib/canvas/canvas-image-data";
 import { buildDecomposeExport, downloadLayerZip, type DecomposeExportPayload, type LayerExportEntry } from "@/lib/canvas/canvas-decompose";
 import { fitNodeSize, nodeSizeFromRatio } from "@/lib/canvas/canvas-node-size";
 import { captureVideoFrame, type VideoFramePosition } from "@/lib/canvas/canvas-video-frame";
@@ -2043,10 +2043,7 @@ function InfiniteCanvasPage() {
     const cutoutImageNode = useCallback(
         async (node: CanvasNodeData, payload: CanvasImageCutoutPayload) => {
             if (!node.metadata?.content) return;
-            setCutoutNodeId(null);
             const cutout = await uploadImage(payload.dataUrl);
-            const generationConfig = { ...buildGenerationConfig(effectiveConfig, node, "image"), count: "1", size: "auto", background: "transparent" };
-            const repairing = payload.aiRepair && isAiConfigReady(generationConfig, generationConfig.model);
             const size = fitNodeSize(cutout.width, cutout.height, node.width, node.height);
             const childId = nanoid();
             const child: CanvasNodeData = {
@@ -2059,7 +2056,6 @@ function InfiniteCanvasPage() {
                 metadata: {
                     ...imageMetadata(cutout),
                     prompt: node.metadata?.prompt,
-                    ...(repairing ? { status: NODE_STATUS_LOADING, errorDetails: undefined } : {}),
                 },
             };
             setNodes((prev) => [...prev, child]);
@@ -2067,39 +2063,8 @@ function InfiniteCanvasPage() {
             setSelectedNodeIds(new Set([childId]));
             setSelectedConnectionId(null);
             setDialogNodeId(childId);
-            if (!payload.aiRepair) return;
-            if (!repairing) {
-                message.warning(t("canvas.projectPage.cutoutNoConfig"));
-                return;
-            }
-            setRunningNodeId(childId);
-            const controller = startGenerationRequest(childId, node.id, childId);
-            try {
-                const repaired = await requestEdit(
-                    generationConfig,
-                    t("canvas.projectPage.cutoutRepairPrompt"),
-                    [{ id: childId, name: `${node.title || node.id}-cutout.png`, type: cutout.mimeType || "image/png", dataUrl: cutout.url, storageKey: cutout.storageKey }],
-                    { signal: controller.signal },
-                ).then((items) => items[0]);
-                const repairedDataUrl = await imageToDataUrl({ dataUrl: repaired.dataUrl }, { signal: controller.signal });
-                const finalDataUrl = payload.transparentBackground ? repairedDataUrl : await flattenImageDataUrl(repairedDataUrl);
-                const uploaded = await uploadImage(finalDataUrl, { signal: controller.signal });
-                const nextSize = fitNodeSize(uploaded.width, uploaded.height, node.width, node.height);
-                setNodes((prev) =>
-                    prev.map((item) =>
-                        item.id === childId ? { ...item, width: nextSize.width, height: nextSize.height, metadata: { ...item.metadata, ...imageMetadata(uploaded), prompt: node.metadata?.prompt, errorDetails: undefined } } : item,
-                    ),
-                );
-            } catch (error) {
-                if (isGenerationCanceled(error)) return;
-                message.warning(t("canvas.projectPage.cutoutRepairFailed"));
-                setNodes((prev) => prev.map((item) => (item.id === childId ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_SUCCESS } } : item)));
-            } finally {
-                finishGenerationRequest(childId, controller);
-                setRunningNodeId(null);
-            }
         },
-        [effectiveConfig, finishGenerationRequest, isAiConfigReady, message, startGenerationRequest, t],
+        [t],
     );
 
     const splitImageNode = useCallback(

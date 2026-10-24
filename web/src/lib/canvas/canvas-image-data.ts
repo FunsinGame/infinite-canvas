@@ -91,6 +91,43 @@ export async function cutoutMaskDataUrl(dataUrl: string, maskDataUrl: string, tr
     return output.toDataURL("image/png");
 }
 
+const CUTOUT_MARKER_COLOR = "#ff00ff";
+
+export async function buildCutoutAiReferenceDataUrl(dataUrl: string, region: { rect?: ImageCropRect; maskDataUrl?: string }) {
+    const image = await loadImage(dataUrl);
+    const canvas = document.createElement("canvas");
+    canvas.width = image.width;
+    canvas.height = image.height;
+    const context = canvas.getContext("2d");
+    if (!context) return dataUrl;
+    context.drawImage(image, 0, 0);
+    const overlay = document.createElement("canvas");
+    overlay.width = canvas.width;
+    overlay.height = canvas.height;
+    const overlayContext = overlay.getContext("2d");
+    if (!overlayContext) return dataUrl;
+    // Keep the selection, mark everything else as the magenta placeholder the model must erase.
+    overlayContext.fillStyle = CUTOUT_MARKER_COLOR;
+    overlayContext.fillRect(0, 0, overlay.width, overlay.height);
+    overlayContext.globalCompositeOperation = "destination-out";
+    if (region.maskDataUrl) {
+        const mask = await loadImage(region.maskDataUrl);
+        overlayContext.drawImage(mask, 0, 0, overlay.width, overlay.height);
+    } else if (region.rect) {
+        overlayContext.fillStyle = "#000000";
+        overlayContext.fillRect(Math.round(region.rect.x * overlay.width), Math.round(region.rect.y * overlay.height), Math.round(region.rect.width * overlay.width), Math.round(region.rect.height * overlay.height));
+    }
+    overlayContext.globalCompositeOperation = "source-over";
+    context.drawImage(overlay, 0, 0);
+    return canvas.toDataURL("image/png");
+}
+
+export async function trimTransparentDataUrl(dataUrl: string) {
+    const image = await loadImage(dataUrl);
+    const trimmed = trimTransparent(image);
+    return trimmed ? trimmed.toDataURL("image/png") : null;
+}
+
 export async function flattenImageDataUrl(dataUrl: string, color = "#ffffff") {
     const image = await loadImage(dataUrl);
     const canvas = document.createElement("canvas");
