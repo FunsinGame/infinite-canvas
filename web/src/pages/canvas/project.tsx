@@ -18,7 +18,7 @@ import { canvasThemes, type CanvasBackgroundMode } from "@/lib/canvas-theme";
 import { useAssetStore } from "@/stores/use-asset-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { cropDataUrl, resizeDataUrl, splitDataUrl, upscaleDataUrl } from "@/lib/canvas/canvas-image-data";
-import { buildDecomposeExport, downloadLayerZip, type DecomposeExportPayload, type LayerExportEntry } from "@/lib/canvas/canvas-decompose";
+import { buildDecomposeExport, downloadLayerZip, type LayerExportEntry } from "@/lib/canvas/canvas-decompose";
 import { fitNodeSize, nodeSizeFromRatio } from "@/lib/canvas/canvas-node-size";
 import { captureVideoFrame, type VideoFramePosition } from "@/lib/canvas/canvas-video-frame";
 import { App, Button, Modal } from "antd";
@@ -2153,44 +2153,6 @@ function InfiniteCanvasPage() {
         [message, t],
     );
 
-    const createDecomposeResultNode = useCallback(
-        async ({ sourceNodeId, cache, baseBlob }: DecomposeExportPayload) => {
-            const source = nodesRef.current.find((node) => node.id === sourceNodeId);
-            if (!source) return false;
-            try {
-                const base = await uploadImage(baseBlob);
-                const childId = nanoid();
-                const width = source.width;
-                const height = source.height;
-                const x = source.position.x + source.width + 96;
-                let y = source.position.y;
-                while (nodesRef.current.some((node) => node.position.x < x + width && node.position.x + node.width > x && node.position.y < y + height && node.position.y + node.height > y)) y += height + 24;
-                const child: CanvasNodeData = {
-                    id: childId,
-                    type: CanvasNodeType.Image,
-                    title: source.metadata?.decompose ? source.title : t("decompose.groupTitle", { name: source.title || t("assets.kinds.image") }),
-                    position: { x, y },
-                    width,
-                    height,
-                    metadata: {
-                        ...imageMetadata(base),
-                        decompose: { ...cache, baseStorageKey: base.storageKey, sourceNodeId },
-                    },
-                };
-                setNodes((prev) => [...prev, child]);
-                setConnections((prev) => [...prev, { id: nanoid(), fromNodeId: sourceNodeId, toNodeId: childId }]);
-                setSelectedNodeIds(new Set([childId]));
-                setSelectedConnectionId(null);
-                setDialogNodeId(null);
-                return true;
-            } catch (error) {
-                message.error(error instanceof Error ? error.message : t("decompose.failed"));
-                return false;
-            }
-        },
-        [message, t],
-    );
-
     const maskEditImageNode = useCallback(
         async (node: CanvasNodeData, payload: CanvasImageMaskEditPayload) => {
             if (!node.metadata?.content) return;
@@ -3675,7 +3637,6 @@ function InfiniteCanvasPage() {
                     config={buildGenerationConfig(effectiveConfig, decomposeNode ?? undefined, "image")}
                     onClose={() => setDecomposeNodeId(null)}
                     onOpenConfig={() => openConfigDialog(true)}
-                    onExported={createDecomposeResultNode}
                 />
 
                 {upscaleNode?.metadata?.content ? (

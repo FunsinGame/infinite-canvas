@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
-import { Popover, Segmented, Tag } from "antd";
-import { Eraser, GripVertical, Type } from "lucide-react";
+import { Button, Popover, Segmented, Tag, Tooltip } from "antd";
+import { ArrowUpToLine, Eraser, GripVertical, Type } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import {
@@ -146,6 +146,18 @@ export function CanvasDecomposeLayerTree({ elements, previews, onTypeChange, onR
                                 ]}
                                 onChange={(value) => onResolutionChange(element.id, value as DecomposeResolution)}
                             />
+
+                            <Tooltip title={t("decompose.moveToTopLevel")}>
+                                <Button
+                                    type="text"
+                                    size="small"
+                                    className="shrink-0"
+                                    icon={<ArrowUpToLine className="size-4" />}
+                                    aria-label={t("decompose.moveToTopLevel")}
+                                    disabled={!element.parentId}
+                                    onClick={() => onReparent(element.id, null)}
+                                />
+                            </Tooltip>
                         </div>
                     );
                 })}

@@ -3,11 +3,12 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProp
 type ImageSize = { width: number; height: number };
 
 const minZoom = 1;
-const maxZoom = 4;
+const defaultMaxZoom = 4;
 const zoomStep = 1.2;
 const viewportPadding = 16;
 
-export function useImageEditorViewport(image: ImageSize | null, open: boolean) {
+export function useImageEditorViewport(image: ImageSize | null, open: boolean, options?: { maxZoom?: number }) {
+    const maxZoom = Math.max(minZoom, options?.maxZoom ?? defaultMaxZoom);
     const viewportNodeRef = useRef<HTMLDivElement>(null);
     const stageRef = useRef<HTMLDivElement>(null);
     const panRef = useRef<{ pointerId: number; x: number; y: number; scrollLeft: number; scrollTop: number } | null>(null);
@@ -122,7 +123,7 @@ export function useImageEditorViewport(image: ImageSize | null, open: boolean) {
             zoomAnchorRef.current = { zoom: boundedZoom, ratioX, ratioY, viewportX, viewportY };
             setZoom(boundedZoom);
         },
-        [baseSize.height, baseSize.width, zoom],
+        [baseSize.height, baseSize.width, maxZoom, zoom],
     );
 
     useEffect(() => {
@@ -196,10 +197,8 @@ export function useImageEditorViewport(image: ImageSize | null, open: boolean) {
             height: stageSize.height,
         } satisfies CSSProperties,
         mediaStyle: {
-            width: baseSize.width,
-            height: baseSize.height,
-            transform: `translateZ(0) scale(${zoom})`,
-            transformOrigin: "top left",
+            width: stageSize.width,
+            height: stageSize.height,
         } satisfies CSSProperties,
     };
 }

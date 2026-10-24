@@ -14,15 +14,31 @@ export type CutoutMatte = {
     box: { x: number; y: number; width: number; height: number };
 };
 
-// 本地抠图在缩小后的分析图上计算，最后只把 alpha 放回原图，避免大图卡顿。
-const ANALYSIS_LONG_EDGE = 1024;
+export type CutoutParams = {
+    /** 框选模式：相邻像素颜色差超过该值就当作图案边缘。越小越保守，越大越容易漏进主体。 */
+    edgeThreshold: number;
+    /** 框选模式：只保留选区中间这个比例范围内的主体。 */
+    centralRatio: number;
+    /** 导向滤波半径，越大边缘越柔。 */
+    feather: number;
+    /** 边缘收缩像素数，用来去掉主体外侧的暗边/阴影。 */
+    shrink: number;
+    /** 分析图长边，越大越精细但越慢。 */
+    analysisLongEdge: number;
+};
+
+export const defaultCutoutParams: CutoutParams = {
+    edgeThreshold: 40,
+    centralRatio: 0.5,
+    feather: 4,
+    shrink: 0,
+    analysisLongEdge: 1024,
+};
+
 const EDGE_COLOR_WEIGHT = 8;
-// 框选模式从选区外的背景向内泛洪，颜色差超过该值就视为图案边缘，并把这圈像素一起挡住。
-const EDGE_BARRIER_THRESHOLD = 48;
 const BORDER_SEED_PX = 2;
 const ALPHA_FLOOR = 0.06;
 const ALPHA_CEIL = 0.94;
-const GUIDE_RADIUS = 4;
 const GUIDE_EPSILON = 1e-4;
 const CUTOUT_MARKER_COLOR = "#ff00ff";
 const MAX_EDGE_COST = 1 + EDGE_COLOR_WEIGHT * 3;
@@ -32,10 +48,11 @@ type SeedLabels = Uint8Array; // 0 unknown, 1 foreground seed, 2 background seed
 type PixelBox = { x: number; y: number; width: number; height: number };
 
 /** 一次处理多个选区：原图只解码和分析一次，每个选区各自生成一张透明 PNG。 */
-export async function cutoutMattes(dataUrl: string, regions: CutoutRegion[]): Promise<(CutoutMatte | null)[]> {
+export async function cutoutMattes(dataUrl: string, regions: CutoutRegion[], params: CutoutParams = defaultCutoutParams): Promise<(CutoutMatte | null)[]> {
     if (!regions.length) return [];
     const image = await loadImage(dataUrl);
-    const scale = Math.min(1, ANALYSIS_LONG_EDGE / Math.max(image.width, image.height));
+    const longEdge = clamp(Math.round(params.analysisLongEdge), 256, 2048);
+    const scale = Math.min(1, longEdge / Math.max(image.width, image.height));
     const width = Math.max(1, Math.round(image.width * scale));
     const height = Math.max(1, Math.round(image.height * scale));
     const small = drawToSize(image, width, height);
@@ -46,7 +63,7 @@ export async function cutoutMattes(dataUrl: string, regions: CutoutRegion[]): Pr
         let alpha: Float32Array | null = null;
         if (region.rect) {
             const box = toPixelBox(region.rect, width, height);
-            if (box && box.width >= 2 && box.height >= 2) alpha = rectAlpha(data, width, height, box);
+            if (box && box.width >= 2 && box.height >= 2) alpha = rectAlpha(data, width, height, box, params);
         } else {
             const labels = await buildBrushSeeds(data, width, height, region);
             if (labels) {
@@ -55,9 +72,24 @@ export async function cutoutMattes(dataUrl: string, regions: CutoutRegion[]): Pr
                 alpha = computed;
             }
         }
-        results.push(alpha ? composeMatte(image, upscaleAlpha(smoothAlpha(data, alpha, width, height), width, height, image.width, image.height)) : null);
+        results.push(alpha ? composeMatte(image, upscaleAlpha(smoothAlpha(data, alpha, width, height, params.feather, params.shrink), width, height, image.width, image.height)) : null);
+        // 多个选区之间让出主线程，避免连续计算时弹窗完全卡住。
+        if (results.length < regions.length) await new Promise((resolve) => setTimeout(resolve, 0));
     }
     return results;
+}
+
+/** 把透明抠图合成到指定背景色上，用于黑/白/绿三种非透明背景。 */
+export async function flattenCutoutDataUrl(dataUrl: string, color: string) {
+    const image = await loadImage(dataUrl);
+    const canvas = document.createElement("canvas");
+    canvas.width = image.width;
+    canvas.height = image.height;
+    const context = canvas.getContext("2d")!;
+    context.fillStyle = color;
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    context.drawImage(image, 0, 0);
+    return canvas.toDataURL("image/png");
 }
 
 /**
@@ -99,16 +131,27 @@ export async function buildCutoutRepairReferences(originalDataUrl: string, matte
 /**
  * 框选模式：把选区外和图片最外圈当作背景种子，向选区内泛洪。
  * 泛洪不会越过颜色突变（图案边缘），所以被轮廓围住的按钮内部、文字都保持不透明，
- * 而选区里与外部背景连通的部分会被剔除。泛洪覆盖不到的区域再按是否与选区相交筛选。
+ * 泛洪覆盖不到的区域再按是否落在选区中央区域筛选：中央是这次要抠的主体，
+ * 边缘多选的其它内容（例如下方另一个头像框）会被剔除。
  */
-function rectAlpha(data: Uint8ClampedArray, width: number, height: number, box: PixelBox) {
-    const visited = floodBackground(data, width, height, box);
+function rectAlpha(data: Uint8ClampedArray, width: number, height: number, box: PixelBox, params: CutoutParams) {
+    const visited = floodBackground(data, width, height, box, params.edgeThreshold);
     const components = new Int32Array(width * height).fill(-1);
-    const keep: boolean[] = [];
+    const totals: number[] = [];
+    const centralTotals: number[] = [];
+    const overlapTotals: number[] = [];
+    const ratio = clamp(params.centralRatio, 0.3, 0.9);
+    const inset = (1 - ratio) / 2;
+    const centralLeft = Math.floor(box.x + box.width * inset);
+    const centralRight = Math.ceil(box.x + box.width * (1 - inset));
+    const centralTop = Math.floor(box.y + box.height * inset);
+    const centralBottom = Math.ceil(box.y + box.height * (1 - inset));
     const queue: number[] = [];
     for (let start = 0; start < components.length; start += 1) {
         if (visited[start] || components[start] !== -1) continue;
-        const id = keep.length;
+        const id = totals.length;
+        let total = 0;
+        let central = 0;
         let overlap = 0;
         components[start] = id;
         queue.length = 0;
@@ -117,6 +160,8 @@ function rectAlpha(data: Uint8ClampedArray, width: number, height: number, box: 
             const index = queue[head];
             const x = index % width;
             const y = (index - x) / width;
+            total += 1;
+            if (x >= centralLeft && x < centralRight && y >= centralTop && y < centralBottom) central += 1;
             if (isInside(x, y, box)) overlap += 1;
             const visit = (next: number) => {
                 if (visited[next] || components[next] !== -1) return;
@@ -128,14 +173,29 @@ function rectAlpha(data: Uint8ClampedArray, width: number, height: number, box: 
             if (x + 1 < width) visit(index + 1);
             if (y + 1 < height) visit(index + width);
         }
-        keep.push(overlap > 0);
+        totals.push(total);
+        centralTotals.push(central);
+        overlapTotals.push(overlap);
+    }
+
+    // 选区的中央区域才是这次想抠的主体：只保留与中央区域相交的组件，
+    // 这样下方多选的另一个头像框（只占选区边缘）会被一起剔除。
+    const keep = new Set<number>();
+    for (let id = 0; id < totals.length; id += 1) if (centralTotals[id] > 0) keep.add(id);
+    if (!keep.size) {
+        let best = -1;
+        for (let id = 0; id < totals.length; id += 1) {
+            if (overlapTotals[id] <= 0) continue;
+            if (best < 0 || overlapTotals[id] > overlapTotals[best] || (overlapTotals[id] === overlapTotals[best] && totals[id] > totals[best])) best = id;
+        }
+        if (best >= 0) keep.add(best);
     }
 
     const alpha = new Float32Array(width * height);
     let subject = false;
     for (let index = 0; index < alpha.length; index += 1) {
         const id = components[index];
-        if (id >= 0 && keep[id]) {
+        if (id >= 0 && keep.has(id)) {
             alpha[index] = 1;
             subject = true;
         }
@@ -143,8 +203,8 @@ function rectAlpha(data: Uint8ClampedArray, width: number, height: number, box: 
     return subject ? alpha : fallbackRectAlpha(width, height, box);
 }
 
-function floodBackground(data: Uint8ClampedArray, width: number, height: number, box: PixelBox) {
-    const barrier = buildBarrier(data, width, height);
+function floodBackground(data: Uint8ClampedArray, width: number, height: number, box: PixelBox, edgeThreshold: number) {
+    const barrier = buildBarrier(data, width, height, edgeThreshold);
     const visited = new Uint8Array(width * height);
     const queue: number[] = [];
     const seed = (index: number) => {
@@ -177,16 +237,17 @@ function floodBackground(data: Uint8ClampedArray, width: number, height: number,
 }
 
 /** 把强边缘两侧的像素都标成障碍，细边框上的小缺口也会被两侧的边缘一起封住。 */
-function buildBarrier(data: Uint8ClampedArray, width: number, height: number) {
+function buildBarrier(data: Uint8ClampedArray, width: number, height: number, edgeThreshold: number) {
     const barrier = new Uint8Array(width * height);
+    const threshold = clamp(edgeThreshold, 5, 200);
     for (let y = 0; y < height; y += 1) {
         for (let x = 0; x < width; x += 1) {
             const index = y * width + x;
-            if (x + 1 < width && colorDifference(data, index, index + 1) > EDGE_BARRIER_THRESHOLD) {
+            if (x + 1 < width && colorDifference(data, index, index + 1) > threshold) {
                 barrier[index] = 1;
                 barrier[index + 1] = 1;
             }
-            if (y + 1 < height && colorDifference(data, index, index + width) > EDGE_BARRIER_THRESHOLD) {
+            if (y + 1 < height && colorDifference(data, index, index + width) > threshold) {
                 barrier[index] = 1;
                 barrier[index + width] = 1;
             }
@@ -279,18 +340,42 @@ function colorDifference(data: Uint8ClampedArray, from: number, to: number) {
     return Math.abs(data[offset] - data[nextOffset]) + Math.abs(data[offset + 1] - data[nextOffset + 1]) + Math.abs(data[offset + 2] - data[nextOffset + 2]);
 }
 
-function smoothAlpha(data: Uint8ClampedArray, alpha: Float32Array, width: number, height: number) {
+function smoothAlpha(data: Uint8ClampedArray, alpha: Float32Array, width: number, height: number, feather: number, shrink: number) {
+    const source = shrink > 0 ? erodeAlpha(alpha, width, height, shrink) : alpha;
     const guide = new Float32Array(width * height);
     for (let index = 0; index < guide.length; index += 1) {
         const offset = index * 4;
         guide[index] = (data[offset] * 0.299 + data[offset + 1] * 0.587 + data[offset + 2] * 0.114) / 255;
     }
-    const filtered = guidedFilter(guide, alpha, width, height, GUIDE_RADIUS, GUIDE_EPSILON);
+    const radius = Math.max(0, Math.round(feather));
+    const filtered = guidedFilter(guide, source, width, height, radius, GUIDE_EPSILON);
     for (let index = 0; index < filtered.length; index += 1) {
         const value = clamp(filtered[index], 0, 1);
         filtered[index] = value < ALPHA_FLOOR ? 0 : value > ALPHA_CEIL ? 1 : value;
     }
     return filtered;
+}
+
+/** 按像素做最小值腐蚀，收缩透明边缘，用来去掉主体外侧残留的暗边。 */
+function erodeAlpha(alpha: Float32Array, width: number, height: number, amount: number) {
+    const passes = Math.min(8, Math.max(0, Math.round(amount)));
+    let current = alpha;
+    for (let pass = 0; pass < passes; pass += 1) {
+        const next = new Float32Array(current.length);
+        for (let y = 0; y < height; y += 1) {
+            for (let x = 0; x < width; x += 1) {
+                const index = y * width + x;
+                let value = current[index];
+                if (x > 0) value = Math.min(value, current[index - 1]);
+                if (y > 0) value = Math.min(value, current[index - width]);
+                if (x + 1 < width) value = Math.min(value, current[index + 1]);
+                if (y + 1 < height) value = Math.min(value, current[index + width]);
+                next[index] = value;
+            }
+        }
+        current = next;
+    }
+    return current;
 }
 
 /** 涂抹模式只保留与前景种子连通的前景块，去掉零散误判。 */
