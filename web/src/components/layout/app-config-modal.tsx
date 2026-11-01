@@ -269,7 +269,7 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
                                         />
                                     </Form.Item>
                                 </div>
-                                <Form.Item label={t("config.preferences.regenerateBehavior")} className="mb-4">
+                                <Form.Item label={t("config.preferences.regenerateBehavior")} extra={t("config.preferences.regenerateBehaviorImageHint")} className="mb-4">
                                     <Radio.Group value={config.nodeRegenerateBehavior} onChange={(event) => updateConfig("nodeRegenerateBehavior", event.target.value)} className="flex flex-col gap-2">
                                         <Radio value="overwrite">
                                             <span className="block text-sm font-medium">{t("config.preferences.regenerateBehaviorOverwrite")}</span>

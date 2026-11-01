@@ -66,6 +66,7 @@ The current release needs manual verification in these areas:
 - Asset image download: opening an image that still previews in My Assets and clicking Download image should save the file. Titles with Chinese characters, spaces, or brackets such as `【】` should remain the downloaded filename and must not need renaming. Images saved from the canvas in the same session should download as well.
 - Canvas video task resume: starting an OpenAI-style video generation should store the remote task ID on the video node. After a page refresh, a still-pending video should keep polling automatically; if polling stopped, **Get task status** should resume with that task ID until the video is ready, the task fails, or the status request errors. Task failure should then allow a normal retry that creates a new generation.
 - Canvas image generation settings memory: changing the model, resolution, transparent background, or aspect ratio in the image generation node panel (or a config node in image mode) should be remembered. Creating another image node, or reloading the page and opening a node, should start from the last selected values.
+- 画布生图节点再次生成：选中已有生成结果的图片节点，改完提示词点击生成后应直接在该节点原地重新生成（生成状态、张数和主图都写回自身），不再在右侧新建子节点，参考图只沿用该节点已连接的参考图，不再把节点自身的旧图作为参考；生成完成后再次修改提示词重复生成仍然保持原地。设置里「已有内容的文本 / 视频 / 音频节点再次生成时」对生图节点不再生效，文本、视频、音频节点行为不变；导入、裁剪、抠图等图片节点点击生成仍会新建子节点。
 
 The Chinese version contains the complete item-by-item acceptance checklist.
 
